@@ -1,0 +1,6 @@
+{
+  "projects": {
+    "default": "set-your-dev-project-id",
+    "prod": "worka-416c0"
+  }
+}

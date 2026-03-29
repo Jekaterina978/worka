@@ -1,0 +1,24 @@
+{
+  "name": "worka-functions",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "lint": "echo \"No lint configured\"",
+    "deploy": "firebase deploy --only functions",
+    "cleanup:orphan-responses": "node scripts/cleanup_orphan_responses.js"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.3.1",
+    "express": "^4.21.2",
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^5.1.1",
+    "openai": "^4.77.0",
+    "pdf-parse": "^1.1.1",
+    "stripe": "^18.5.0"
+  }
+}

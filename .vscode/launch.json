@@ -1,0 +1,48 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Flutter Dev (APP_ENV=dev)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "debug",
+      "args": [
+        "--dart-define=APP_ENV=dev"
+      ]
+    },
+    {
+      "name": "Flutter Dev + API (APP_ENV=dev, localhost:3000)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "debug",
+      "args": [
+        "--dart-define=APP_ENV=dev",
+        "--dart-define=WORKA_API_BASE_URL=http://localhost:3000"
+      ]
+    },
+    {
+      "name": "Flutter Dev + API (APP_ENV=dev, Firebase emulator)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "debug",
+      "args": [
+        "--dart-define=APP_ENV=dev",
+        "--dart-define=WORKA_API_BASE_URL=http://127.0.0.1:5001/worka-416c0/europe-west3"
+      ]
+    },
+    {
+      "name": "Flutter Prod (APP_ENV=prod)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "release",
+      "args": [
+        "--dart-define=APP_ENV=prod",
+        "--dart-define=WORKA_API_BASE_URL=https://api-YOUR_HASH-ew.a.run.app"
+      ]
+    }
+  ]
+}

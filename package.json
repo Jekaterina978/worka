@@ -1,0 +1,13 @@
+{
+"name": "billing-killswitch",
+"version": "1.0.0",
+"type": "module",
+"main": "index.js",
+"engines": {
+"node": ">=18"
+},
+"dependencies": {
+"@google-cloud/run": "^3.2.0",
+"express": "^4.19.2"
+}
+}

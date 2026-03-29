@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f6f7fb;
+  --card: #ffffff;
+  --border: #e5e7eb;
+  --text: #111827;
+  --muted: #6b7280;
+  --blue: #3b82f6;
+  --blue-hover: #2563eb;
+  --orange: #ff8a00;
+  --orange-hover: #f97316;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.page {
+  @apply mx-auto w-full max-w-[480px] px-4 pb-24 pt-4;
+}
+
+.section-card {
+  @apply rounded-2xl border border-brand-border bg-brand-card p-4 shadow-sm;
+}
+
+.field {
+  @apply w-full rounded-xl border border-brand-border bg-white px-3 py-3 text-sm text-brand-text outline-none;
+}
+
+.field:focus {
+  @apply border-brand-blue ring-2 ring-blue-100;
+}

@@ -1,0 +1,13 @@
+{
+  "name": "firebase-backup",
+  "version": "1.0.0",
+  "description": "Backup Firestore + Firebase Storage locally",
+  "scripts": {
+    "backup:firestore": "node backup_firestore.js",
+    "backup:storage": "node backup_storage.js",
+    "backup:all": "node backup_firestore.js && node backup_storage.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}

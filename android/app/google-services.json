@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "877366032418",
+    "project_id": "worka-416c0",
+    "storage_bucket": "worka-416c0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:877366032418:android:504d729b4007bb18ec727b",
+        "android_client_info": {
+          "package_name": "com.worka.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA4_GpVy8dHE7vXYs6qniDNbjzZGqJuo6E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

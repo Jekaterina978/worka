@@ -1,0 +1,430 @@
+rules_version = '2';
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Worka — Firestore Security Rules
+//
+//  Ключевые принципы:
+//    • Гости           → нет доступа нигде (request.auth == null → deny)
+//    • Авторизованные  → читают каталог (jobs, cvs, users)
+//    • Владелец        → полный контроль над своими документами
+//    • ownerType       → обязательно при создании jobs ('personal'|'business')
+//    • Self-protection → нельзя откликнуться / предложить самому себе
+//    • Машина состояний:
+//        applications — applicant: only 'withdrawn'
+//                       employer : only 'viewed'|'accepted'|'rejected'
+//        jobOffers    — candidate: only 'viewed'|'accepted'|'rejected'
+//                       employer : only 'expired'|'withdrawn'
+//    • Иммутабельные поля (vacancyId, cvId, applicantId, employerId, candidateId)
+//      защищены от подмены при update через .get() с дефолтом ''
+// ════════════════════════════════════════════════════════════════════════════
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+    // ──────────────────────────────────────────────────────────────────────
+
+    // Пользователь авторизован (Firebase Auth).
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Запрос от конкретного пользователя.
+    function isSelf(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    // Создание: ownerId == auth.uid.
+    function ownsOwnerId() {
+      return signedIn() && request.resource.data.ownerId == request.auth.uid;
+    }
+
+    // Обновление: ownerId не изменился.
+    function ownerUnchanged() {
+      return request.resource.data.ownerId == resource.data.ownerId;
+    }
+
+    // Текущий пользователь — владелец документа.
+    function isOwner() {
+      return signedIn() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Документ принадлежит текущему пользователю по произвольному полю.
+    function isSelfByField(field) {
+      return signedIn() && resource.data.get(field, '') == request.auth.uid;
+    }
+
+    // ownerType допустимого значения.
+    function validOwnerType() {
+      return request.resource.data.ownerType in ['personal', 'business'];
+    }
+
+    // ownerType не изменился при обновлении.
+    function ownerTypeUnchanged() {
+      return request.resource.data.ownerType == resource.data.ownerType;
+    }
+
+    // Защита от добавления лишних полей в документ.
+    function keysOnly(allowed) {
+      return request.resource.data.keys().hasOnly(allowed);
+    }
+
+    // Иммутабельное поле: значение при update совпадает с сохранённым.
+    // Использует .get() → не падает если поле отсутствует в документе.
+    function immutable(field) {
+      return request.resource.data.get(field, '') == resource.data.get(field, '');
+    }
+
+    // Есть подтвержденный permanent access к контактам кандидата.
+    function hasUnlockedCandidateContact(candidateId) {
+      return signedIn()
+          && exists(/databases/$(database)/documents/employers/$(request.auth.uid)/contact_unlocks/$(candidateId));
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /users/{uid}  — профиль пользователя
+    // ──────────────────────────────────────────────────────────────────────
+    //  Вариант A (текущий): read для всех авторизованных — нужен для показа
+    //    имён работодателей/кандидатов в UI (вакансии, отклики).
+    //  Вариант B (приватнее): замените signedIn() на isSelf(uid) — тогда
+    //    профиль видит только сам пользователь. Но UI, показывающий имена,
+    //    должен получать их из snapshot-полей документов, а не из /users.
+    // ──────────────────────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read: if signedIn();                  // Вариант A
+      // allow read: if isSelf(uid);              // Вариант B (безопаснее)
+
+      allow create, update, delete: if isSelf(uid);
+
+      // ── users/{uid}/favorites ──────────────────────────────────────────
+      //  Избранные вакансии соискателя.
+      match /favorites/{docId} {
+        allow read, create, update, delete: if isSelf(uid);
+      }
+
+      // ── users/{uid}/favoritesCandidates ────────────────────────────────
+      //  Избранные кандидаты работодателя.
+      match /favoritesCandidates/{docId} {
+        allow read, create, update, delete: if isSelf(uid);
+      }
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /cvs/{cvId}  — резюме соискателей
+    // ──────────────────────────────────────────────────────────────────────
+    match /cvs/{cvId} {
+      // Все авторизованные читают каталог (работодатель ищет кандидатов).
+      allow read: if signedIn();
+
+      // Создать CV: ownerId == uid.
+      allow create: if ownsOwnerId();
+
+      // Редактировать: только владелец, ownerId неизменен.
+      allow update: if isOwner() && ownerUnchanged();
+
+      // Удалить: только владелец.
+      allow delete: if isOwner();
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  Monetization / Credits (server-authoritative)
+    // ──────────────────────────────────────────────────────────────────────
+    //  Ключевая модель:
+    //    • клиент читает только СВОИ данные
+    //    • клиент НЕ пишет wallet/unlock/spend напрямую
+    //    • все критические writes только через Admin SDK / Cloud Functions
+    //
+    //  ВАЖНО: если нужно открыть публичный доступ к CV без контактов,
+    //  храните контакты отдельно (candidate_contacts_private) и выдавайте
+    //  доступ только владельцу или при unlock.
+    // ──────────────────────────────────────────────────────────────────────
+
+    // Wallet/профиль работодателя с балансом кредитов.
+    match /employers/{uid} {
+      // Пользователь видит только свой wallet/статус.
+      allow read: if isSelf(uid);
+      // Запрет прямых клиентских изменений критичных данных.
+      allow create, update, delete: if false;
+
+      // users/{employerId}/contact_unlocks/{candidateId}
+      match /contact_unlocks/{candidateId} {
+        // Только владелец wallet видит список своих unlocked contacts.
+        allow read: if isSelf(uid);
+        // Создание unlock только на сервере (transaction в Cloud Functions).
+        allow create, update, delete: if false;
+      }
+    }
+
+    // Ledger списаний/начислений кредитов.
+    match /credit_ledger/{txId} {
+      // Пользователь читает только свои транзакции.
+      allow read: if isSelfByField('employer_id');
+      // Клиент не может создать spend/purchase транзакцию вручную.
+      allow create, update, delete: if false;
+    }
+
+    // Покупки (Stripe intents / purchase state).
+    match /purchases/{purchaseId} {
+      allow read: if isSelfByField('employer_id');
+      // Любые writes только через backend/webhook.
+      allow create, update, delete: if false;
+    }
+
+    // Продвижение вакансий (если используется backend-пайплайн оплаты).
+    match /job_boosts/{boostId} {
+      allow read: if isSelfByField('employer_id');
+      allow create, update, delete: if false;
+    }
+
+    // Верификация работодателя.
+    match /verification_requests/{uid} {
+      allow read: if isSelf(uid);
+      allow create, update, delete: if false;
+    }
+
+    // Рекомендуемое хранилище приватных контактов кандидата:
+    // /candidate_contacts_private/{candidateId}
+    // Доступ:
+    //   • сам кандидат (по ownerId внутри документа или candidateId==uid)
+    //   • работодатель с unlocked access к candidateId
+    match /candidate_contacts_private/{candidateId} {
+      allow read: if signedIn() && (
+        isSelf(candidateId) ||
+        resource.data.ownerId == request.auth.uid ||
+        hasUnlockedCandidateContact(candidateId)
+      );
+      allow create, update, delete: if false;
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /jobs/{jobId}  — вакансии работодателей
+    //  Поле ownerType ('personal'|'business') ОБЯЗАТЕЛЬНО при создании.
+    // ──────────────────────────────────────────────────────────────────────
+    match /jobs/{jobId} {
+      // Все авторизованные читают каталог вакансий.
+      allow read: if signedIn();
+
+      // Создать: ownerId == uid + ownerType валиден.
+      allow create: if ownsOwnerId() && validOwnerType();
+
+      // Редактировать: только владелец, ownerId и ownerType неизменны.
+      // ownerType нельзя менять после создания — атрибут контекста профиля.
+      allow update: if isOwner() && ownerUnchanged() && ownerTypeUnchanged();
+
+      // Удалить: только владелец.
+      allow delete: if isOwner();
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /applications/{id}  — отклики соискателей на вакансии
+    // ──────────────────────────────────────────────────────────────────────
+    match /applications/{id} {
+
+      // Создать отклик:
+      //   • type == "apply" (документ не подменить под другой тип)
+      //   • applicantId == auth.uid
+      //   • vacancyOwnerId != auth.uid  → нельзя на свою вакансию
+      //   • vacancyOwnerType валиден    → снапшот из вакансии
+      allow create: if signedIn()
+          && request.resource.data.type == 'apply'
+          && request.resource.data.applicantId == request.auth.uid
+          && request.resource.data.vacancyOwnerId != request.auth.uid
+          && request.resource.data.vacancyOwnerType in ['personal', 'business'];
+
+      // Читать: сам соискатель или владелец вакансии (оба alias учтены).
+      allow read: if signedIn() && (
+          resource.data.applicantId      == request.auth.uid ||
+          resource.data.candidateOwnerId == request.auth.uid ||
+          resource.data.vacancyOwnerId   == request.auth.uid ||
+          resource.data.employerOwnerId  == request.auth.uid
+      );
+
+      // Обновить — строгая машина состояний.
+      allow update: if signedIn() && (
+
+          // ─ Соискатель: единственный допустимый переход → 'withdrawn' ──────
+          (
+            resource.data.applicantId == request.auth.uid
+            // Иммутабельные идентификаторы
+            && immutable('applicantId')
+            && immutable('vacancyOwnerId')
+            && immutable('vacancyOwnerType')
+            && immutable('employerOwnerId')
+            && immutable('vacancyId')
+            && immutable('cvId')
+            // Только отзыв отклика
+            && request.resource.data.status == 'withdrawn'
+          )
+
+          ||
+
+          // ─ Работодатель: просмотр / принять / отклонить ───────────────────
+          (
+            (
+              resource.data.vacancyOwnerId  == request.auth.uid ||
+              resource.data.employerOwnerId == request.auth.uid
+            )
+            // Иммутабельные идентификаторы
+            && immutable('applicantId')
+            && immutable('vacancyOwnerId')
+            && immutable('vacancyOwnerType')
+            && immutable('employerOwnerId')
+            && immutable('vacancyId')
+            && immutable('cvId')
+            // Разрешённые переходы для работодателя
+            && request.resource.data.status in ['viewed', 'accepted', 'rejected']
+          )
+      );
+
+      // Отклики не удаляются — история переписки сохраняется.
+      allow delete: if false;
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /jobOffers/{id}  — предложения работы (работодатель → кандидат)
+    // ──────────────────────────────────────────────────────────────────────
+    match /jobOffers/{id} {
+
+      // Создать предложение:
+      //   • type == "offer"
+      //   • employerId == auth.uid
+      //   • candidateId != auth.uid  → нельзя себе
+      //   • employerType и vacancyOwnerType валидны
+      allow create: if signedIn()
+          && request.resource.data.type == 'offer'
+          && request.resource.data.employerId == request.auth.uid
+          && request.resource.data.candidateId != request.auth.uid
+          && request.resource.data.employerType in ['personal', 'business']
+          && request.resource.data.vacancyOwnerType in ['personal', 'business'];
+
+      // Читать: работодатель или кандидат (оба alias учтены).
+      allow read: if signedIn() && (
+          resource.data.employerId       == request.auth.uid ||
+          resource.data.employerOwnerId  == request.auth.uid ||
+          resource.data.candidateId      == request.auth.uid ||
+          resource.data.candidateOwnerId == request.auth.uid
+      );
+
+      // Обновить — строгая машина состояний.
+      allow update: if signedIn() && (
+
+          // ─ Кандидат: принять / отклонить / отметить просмотренным ─────────
+          (
+            (
+              resource.data.candidateId      == request.auth.uid ||
+              resource.data.candidateOwnerId == request.auth.uid
+            )
+            // Иммутабельные идентификаторы
+            && immutable('employerId')
+            && immutable('employerOwnerId')
+            && immutable('candidateId')
+            && immutable('candidateOwnerId')
+            && immutable('vacancyId')
+            && immutable('cvId')
+            && immutable('vacancyOwnerType')
+            && immutable('employerType')
+            // Разрешённые переходы для кандидата
+            && request.resource.data.status in ['viewed', 'accepted', 'rejected']
+          )
+
+          ||
+
+          // ─ Работодатель: истёкшее / отозвать предложение ─────────────────
+          (
+            (
+              resource.data.employerId      == request.auth.uid ||
+              resource.data.employerOwnerId == request.auth.uid
+            )
+            // Иммутабельные идентификаторы
+            && immutable('employerId')
+            && immutable('employerOwnerId')
+            && immutable('candidateId')
+            && immutable('candidateOwnerId')
+            && immutable('vacancyId')
+            && immutable('cvId')
+            && immutable('vacancyOwnerType')
+            && immutable('employerType')
+            // Разрешённые переходы для работодателя
+            && request.resource.data.status in ['expired', 'withdrawn']
+          )
+      );
+
+      // Предложения не удаляются.
+      allow delete: if false;
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /responses/{id}  — legacy коллекция (только чтение)
+    //
+    //  ⚠️  ВНИМАНИЕ: если ResponseRepository ещё пишет в эту коллекцию
+    //     (двойная запись для совместимости), временно верните:
+    //       allow create: if signedIn();
+    //       allow update: if signedIn();
+    //     После окончания миграции удалить эти строки.
+    // ──────────────────────────────────────────────────────────────────────
+    match /responses/{id} {
+      allow read:                  if signedIn();
+      allow create, update, delete: if false;
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /notifications/{userId}/items/{itemId}  — уведомления
+    // ──────────────────────────────────────────────────────────────────────
+    match /notifications/{userId}/items/{itemId} {
+      // Только получатель читает и обновляет (отмечает прочитанным).
+      allow read, update: if isSelf(userId);
+
+      // Создавать уведомления может любой авторизованный
+      // (работодатель → кандидату, кандидат → работодателю).
+      allow create: if signedIn();
+
+      allow delete: if false;
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /supportTickets/{ticketId}  — тикеты поддержки
+    // ──────────────────────────────────────────────────────────────────────
+    match /supportTickets/{ticketId} {
+      allow create: if signedIn()
+          && request.resource.data.uid == request.auth.uid;
+
+      allow read: if signedIn()
+          && resource.data.uid == request.auth.uid;
+
+      allow update, delete: if false;
+    }
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  /supportChats/{uid}/messages/{messageId}  — чат с поддержкой
+    // ──────────────────────────────────────────────────────────────────────
+    match /supportChats/{uid}/messages/{messageId} {
+      allow read: if isSelf(uid);
+
+      allow create: if isSelf(uid)
+          // Разрешены только три поля — защита от произвольных данных.
+          && keysOnly(['from', 'text', 'createdAt'])
+          // Отправитель: пользователь или агент поддержки.
+          && request.resource.data.from in ['user', 'support']
+          // Текст: непустая строка, не длиннее 4000 символов.
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 4000
+          // Временная метка обязательна (server timestamp проверяется типом).
+          && request.resource.data.createdAt is timestamp;
+
+      allow update, delete: if false;
+    }
+
+  }
+}

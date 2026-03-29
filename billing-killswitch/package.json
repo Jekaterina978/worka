@@ -1,0 +1,18 @@
+{
+  "name": "billing-killswitch",
+  "version": "1.0.0",
+  "description": "Minimal billing kill-switch service for Cloud Run",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "firebase-admin": "^12.5.0"
+  }
+}
