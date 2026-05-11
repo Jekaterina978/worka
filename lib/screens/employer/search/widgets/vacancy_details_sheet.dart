@@ -10,10 +10,13 @@ import 'package:worka/services/auth_guard.dart';
 import 'package:worka/services/firebase_debug_diagnostics.dart';
 import 'package:worka/services/firestore_paths.dart';
 import 'package:worka/services/ownership_resolver.dart';
+import 'package:worka/services/runtime_flow_logger.dart';
+import 'package:worka/services/apply_vacancy_identity_resolver.dart';
 import 'package:worka/theme/worka_colors.dart';
 import 'package:worka/widgets/vacancy_details_view.dart';
 import 'package:worka/widgets/sent_overlay.dart';
 import 'package:worka/widgets/vacancy_apply_entry_sheet.dart';
+import 'package:worka/screens/cv/cv_wizard_screen.dart';
 
 class VacancyDetailsSheet extends StatefulWidget {
   final String jobId;
@@ -27,7 +30,7 @@ class VacancyDetailsSheet extends StatefulWidget {
     required this.jobId,
     this.asWorker = true,
     this.isOwnerView = false,
-    this.testMode = true,
+    this.testMode = false,
     this.statusFooterText,
   });
 
@@ -36,7 +39,7 @@ class VacancyDetailsSheet extends StatefulWidget {
     required String jobId,
     bool asWorker = true,
     bool isOwnerView = false,
-    bool testMode = true,
+    bool testMode = false,
     String? statusFooterText,
   }) {
     final safeJobId = jobId.trim();
@@ -74,8 +77,6 @@ class VacancyDetailsSheet extends StatefulWidget {
 class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
   final _db = FirebaseFirestore.instance;
 
-  static const String kDevUid = 'dev';
-
   void _toast(String t) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -98,24 +99,32 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
   }
 
   bool _isOwner(Map<String, dynamic> job) {
-    final ownership = OwnershipResolver.vacancyOwnership(
+    final r = OwnershipResolver.vacancyViewerOwnership(
       job,
-      currentUserId: _workerOwnerKey().trim(),
+      viewerUid: _workerOwnerKey().trim(),
     );
-    return ownership.known && ownership.isOwner;
+    return r.known && r.isOwner;
   }
 
   Future<bool> _openApplyFlow(Map<String, dynamic> job) async {
     try {
+      RuntimeFlowLogger.mark('APPLY_ENTRY_OPEN', <String, Object?>{
+        'vacancyId': widget.jobId,
+        'source': 'vacancy_details_sheet.apply_flow',
+      });
       final sent = await VacancyApplyEntrySheet.open(
         context,
         vacancy: job,
         onSendCvTap: () async {
-          if (!AuthGuard.ensureSignedIn(context)) return false;
           final workerId = _workerIdOrEmpty();
           final workerOwnerKey = _workerOwnerKey();
           if (workerId.isEmpty) {
-            _toast('Нужно войти по SMS');
+            if (!context.mounted) return false;
+            await Navigator.of(context, rootNavigator: true).push(
+              MaterialPageRoute(
+                builder: (_) => CvWizardScreen(testMode: widget.testMode),
+              ),
+            );
             return false;
           }
 
@@ -123,7 +132,18 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
             context,
             testMode: widget.testMode,
           );
-          if (picked == null) return false;
+          if (picked == null || picked.cvId.trim().isEmpty) {
+            RuntimeFlowLogger.mark('APPLY_BLOCKED_NO_CV', <String, Object?>{
+              'jobId': widget.jobId,
+              'vacancyId': widget.jobId,
+              'userId': workerOwnerKey,
+              'sourceScreen': 'vacancy_details_sheet',
+            });
+            return false;
+          }
+          RuntimeFlowLogger.mark('APPLY_CV_SELECTED', <String, Object?>{
+            'cvId': picked.cvId,
+          });
 
           debugPrint(
             'VacancyDetailsSheet apply save jobId=${widget.jobId} cvId=${picked.cvId}',
@@ -134,7 +154,7 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
               job['ownerKey'],
               fallback: _s(
                 job['ownerUid'],
-                fallback: widget.testMode ? kDevUid : '',
+                fallback: '',
               ),
             ),
           );
@@ -144,22 +164,66 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
             candidateCvId: picked.cvId,
           );
           if (duplicate) {
+            RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+              'reason': 'duplicate_application',
+              'vacancyId': widget.jobId,
+              'cvId': picked.cvId,
+            });
             if (!mounted) return false;
-            _toast('Отклик уже отправлен');
+            _toast('CV уже отправлено');
             return false;
           }
+          RuntimeFlowLogger.mark('APPLY_PRECHECK_START', <String, Object?>{});
+          final resolvedIdentity = ApplyVacancyIdentityResolver.resolve(
+            vacancyId: widget.jobId,
+            snapshot: job,
+          );
+          ApplyVacancyIdentityResolver.debugLog(
+            identity: resolvedIdentity,
+            vacancyId: widget.jobId,
+            snapshot: job,
+          );
+          if (!resolvedIdentity.isResolved) {
+            RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+              'reason': 'job_id_unresolved',
+              'vacancyId': widget.jobId,
+            });
+            RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+              'ok': false,
+              'reason': 'job_id_unresolved',
+            });
+            if (!mounted) return false;
+            _toast('Вакансия не синхронизирована. Отклик пока нельзя отправить.');
+            return false;
+          }
+          RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+            'ok': true,
+            'reason': 'ready_to_send',
+          });
 
           final applicationId =
               '${widget.jobId}_${workerOwnerKey}_${picked.cvId}_apply';
-          await ResponseRepository(_db).createApply(
+          final applyResult = await ResponseRepository(_db).createApply(
             jobId: widget.jobId,
             jobOwnerId: employerUid,
             candidateCvId: picked.cvId,
             candidateOwnerId: workerOwnerKey,
+            vacancySnapshot: Map<String, dynamic>.from(job),
           );
-          debugPrint(
-            'VacancyDetailsSheet application saved ${FirestorePaths.applications}/$applicationId',
-          );
+          if (applyResult.isAlreadyApplied) {
+            if (!mounted) return false;
+            _toast('CV уже отправлено');
+            return false;
+          }
+          if (applyResult.isBlocked || applyResult.isFailed) {
+            if (!mounted) return false;
+            if (applyResult.reason == 'job_id_unresolved') {
+              _toast('Вакансия не синхронизирована. Отклик пока нельзя отправить.');
+            } else {
+              _toast('Не удалось отправить отклик. Попробуйте ещё раз.');
+            }
+            return false;
+          }
           if (employerUid.isNotEmpty) {
             await NotificationsRepository(_db).createItem(
               toUserId: employerUid,
@@ -181,11 +245,31 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
           return true;
         },
       );
-      if (sent && mounted) Navigator.pop(context);
+      if (sent && mounted) {
+        RuntimeFlowLogger.mark('APPLY_SUCCESS_NAV_DECISION', <String, Object?>{
+          'action': 'keep_vacancy_sheet_open',
+          'vacancyId': widget.jobId,
+          'source': 'vacancy_details_sheet',
+        });
+        RuntimeFlowLogger.mark('APPLY_SUCCESS_NO_ROOT_POP', <String, Object?>{
+          'source': 'vacancy_details_sheet',
+          'vacancyId': widget.jobId,
+        });
+        RuntimeFlowLogger.mark('APPLY_SUCCESS_CONTEXT_RESTORE', <String, Object?>{
+          'note':
+              'User stays on vacancy details; apply entry sheet already closed.',
+          'vacancyId': widget.jobId,
+        });
+        setState(() {});
+      }
       return sent;
     } catch (e) {
       debugPrint('VacancyDetailsSheet _openApplyFlow error: $e');
-      _toast('Ошибка сохранения: $e');
+      if ('$e'.contains('job_id_unresolved')) {
+        _toast('Вакансия не синхронизирована. Отклик пока нельзя отправить.');
+      } else {
+        _toast('Не удалось отправить отклик. Попробуйте ещё раз.');
+      }
       if (FirebaseDebugDiagnostics.isPermissionDenied(e)) {
         _toast(FirebaseDebugDiagnostics.permissionHintText());
       }
@@ -222,7 +306,8 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
         ? Stream<bool>.value(false)
         : _db
               .collection(FirestorePaths.applications)
-              .where('applicantId', isEqualTo: workerId)
+              .where('type', isEqualTo: 'apply')
+              .where('candidateOwnerId', isEqualTo: workerId)
               .where('vacancyId', isEqualTo: widget.jobId)
               .where(
                 'status',
@@ -256,7 +341,7 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
               final permissionDenied =
                   FirebaseDebugDiagnostics.isPermissionDenied(jobSnap.error);
               return _errorState(
-                'Ошибка загрузки вакансии: ${jobSnap.error}',
+                'Не удалось загрузить вакансию. Попробуйте позже.',
                 showRulesHint: permissionDenied && widget.testMode,
               );
             }
@@ -282,7 +367,7 @@ class _VacancyDetailsSheetState extends State<VacancyDetailsSheet> {
                     'VacancyDetailsSheet hasApplied stream error: ${respSnap.error}',
                   );
                   return _errorState(
-                    'Ошибка загрузки откликов: ${respSnap.error}',
+                    'Не удалось загрузить отклики. Попробуйте позже.',
                   );
                 }
                 final alreadyApplied = respSnap.data ?? false;

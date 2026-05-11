@@ -5,16 +5,18 @@ import 'package:flutter/foundation.dart';
 
 import '../services/auth_guard.dart';
 import '../services/firestore_paths.dart';
+import '../services/ownership_context.dart';
 import '../services/ownership_resolver.dart';
+import '../services/vacancy_owner_scope_resolver.dart';
 import '../theme/worka_colors.dart';
-import '../theme/worka_ui_tokens.dart';
+import '../utils/country_display_formatter.dart';
 import '../features/payments/payments_routes.dart';
 import 'favorite_star_button.dart';
 import 'vacancy_cta_button.dart';
 
 enum WorkaJobCardMode {
-  search, // legacy alias of marketplace
-  readonlyStatus, // legacy alias of status
+  search,
+  readonlyStatus,
   owner,
   marketplace,
   status,
@@ -45,6 +47,12 @@ class WorkaJobCard extends StatelessWidget {
     this.ownerUid,
     this.ownerEmail,
     this.highlight = false,
+    this.priority = false,
+    this.bump = false,
+    this.contacts = false,
+    this.paidUrgent = false,
+    this.vacancyOwnerType,
+    this.vacancyOwnerId,
     this.onTap,
     this.onApply,
     this.topRight,
@@ -53,11 +61,15 @@ class WorkaJobCard extends StatelessWidget {
     this.footerLeading,
     this.salaryTrailing,
     this.employmentLabel = 'Полная занятость',
-    this.applyLabel = 'Взять работу',
+    this.applyLabel = 'ОТКЛИКНУТЬСЯ',
     this.bottomRight,
     this.salaryMainColor = WorkaColors.salaryAccent,
     this.verifiedEmployer = false,
     this.mode = WorkaJobCardMode.search,
+    this.ownerAvatarUrl = '',
+    this.ownerCompanyLogoUrl = '',
+    this.ownerBusinessHint = false,
+    this.vacancyOwnershipData,
   });
 
   final String title;
@@ -85,13 +97,18 @@ class WorkaJobCard extends StatelessWidget {
   final String? ownerUid;
   final String? ownerEmail;
   final bool highlight;
+  final bool priority;
+  final bool bump;
+  final bool contacts;
+  final bool paidUrgent;
+  final String? vacancyOwnerType;
+  final String? vacancyOwnerId;
 
   final VoidCallback? onTap;
   final VoidCallback? onApply;
   final Widget? topRight;
   final bool showApply;
 
-  // Kept for backward-compatible API.
   final double topRightReservedWidth;
   final Widget? footerLeading;
   final Widget? salaryTrailing;
@@ -101,11 +118,15 @@ class WorkaJobCard extends StatelessWidget {
   final Color salaryMainColor;
   final bool verifiedEmployer;
   final WorkaJobCardMode mode;
+  final String ownerAvatarUrl;
+  final String ownerCompanyLogoUrl;
+  final bool ownerBusinessHint;
 
-  static const double _mH = 10;
-  static const double _mV = 2;
-  static const double _radius = WorkaUiRadius.card;
-  static const EdgeInsets _pad = EdgeInsets.fromLTRB(18, 16, 18, 16);
+  /// When set (marketplace cards), ownership uses explicit vacancy scope fields.
+  final Map<String, dynamic>? vacancyOwnershipData;
+
+  static const double _radius = 20;
+  static const EdgeInsets _pad = EdgeInsets.all(16);
 
   bool get _isMarketplaceMode =>
       mode == WorkaJobCardMode.marketplace || mode == WorkaJobCardMode.search;
@@ -113,108 +134,88 @@ class WorkaJobCard extends StatelessWidget {
       mode == WorkaJobCardMode.status ||
       mode == WorkaJobCardMode.readonlyStatus;
 
-  static const Map<String, String> _countryFlags = <String, String>{
-    'Австрия': '🇦🇹',
-    'Азербайджан': '🇦🇿',
-    'Армения': '🇦🇲',
-    'Беларусь': '🇧🇾',
-    'Бельгия': '🇧🇪',
-    'Болгария': '🇧🇬',
-    'Венгрия': '🇭🇺',
-    'Германия': '🇩🇪',
-    'Греция': '🇬🇷',
-    'Грузия': '🇬🇪',
-    'Дания': '🇩🇰',
-    'Ирландия': '🇮🇪',
-    'Исландия': '🇮🇸',
-    'Испания': '🇪🇸',
-    'Италия': '🇮🇹',
-    'Казахстан': '🇰🇿',
-    'Кипр': '🇨🇾',
-    'Кыргызстан': '🇰🇬',
-    'Латвия': '🇱🇻',
-    'Литва': '🇱🇹',
-    'Люксембург': '🇱🇺',
-    'Мальта': '🇲🇹',
-    'Молдова': '🇲🇩',
-    'Нидерланды': '🇳🇱',
-    'Норвегия': '🇳🇴',
-    'Польша': '🇵🇱',
-    'Португалия': '🇵🇹',
-    'Румыния': '🇷🇴',
-    'Словакия': '🇸🇰',
-    'Словения': '🇸🇮',
-    'Таджикистан': '🇹🇯',
-    'Туркменистан': '🇹🇲',
-    'Украина': '🇺🇦',
-    'Узбекистан': '🇺🇿',
-    'Финляндия': '🇫🇮',
-    'Франция': '🇫🇷',
-    'Хорватия': '🇭🇷',
-    'Чехия': '🇨🇿',
-    'Швеция': '🇸🇪',
-    'Эстония': '🇪🇪',
-    'Austria': '🇦🇹',
-    'Azerbaijan': '🇦🇿',
-    'Armenia': '🇦🇲',
-    'Belarus': '🇧🇾',
-    'Belgium': '🇧🇪',
-    'Bulgaria': '🇧🇬',
-    'Hungary': '🇭🇺',
-    'Germany': '🇩🇪',
-    'Greece': '🇬🇷',
-    'Georgia': '🇬🇪',
-    'Denmark': '🇩🇰',
-    'Ireland': '🇮🇪',
-    'Iceland': '🇮🇸',
-    'Spain': '🇪🇸',
-    'Italy': '🇮🇹',
-    'Kazakhstan': '🇰🇿',
-    'Cyprus': '🇨🇾',
-    'Kyrgyzstan': '🇰🇬',
-    'Latvia': '🇱🇻',
-    'Lithuania': '🇱🇹',
-    'Luxembourg': '🇱🇺',
-    'Malta': '🇲🇹',
-    'Moldova': '🇲🇩',
-    'Netherlands': '🇳🇱',
-    'Norway': '🇳🇴',
-    'Poland': '🇵🇱',
-    'Portugal': '🇵🇹',
-    'Romania': '🇷🇴',
-    'Slovakia': '🇸🇰',
-    'Slovenia': '🇸🇮',
-    'Tajikistan': '🇹🇯',
-    'Turkmenistan': '🇹🇲',
-    'Ukraine': '🇺🇦',
-    'Uzbekistan': '🇺🇿',
-    'Finland': '🇫🇮',
-    'France': '🇫🇷',
-    'Croatia': '🇭🇷',
-    'Czechia': '🇨🇿',
-    'Sweden': '🇸🇪',
-    'Estonia': '🇪🇪',
-  };
-
-  String _flagForCountry(String name) {
-    final t = name.trim();
-    if (t.isEmpty) return '';
-    final exact = _countryFlags[t];
-    if (exact != null) return exact;
-    final lower = t.toLowerCase();
-    for (final e in _countryFlags.entries) {
-      if (e.key.toLowerCase() == lower) return e.value;
+  bool _viewerOwnsVacancy() {
+    if (mode == WorkaJobCardMode.owner) return true;
+    final snap = vacancyOwnershipData;
+    if (snap != null && snap.isNotEmpty) {
+      return OwnershipResolver.vacancyIsOwnedByCurrentViewer(snap);
     }
-    return '';
+    final ot = (vacancyOwnerType ?? '').trim();
+    if (ot.isEmpty) {
+      return false;
+    }
+    final oid = (vacancyOwnerId ?? '').trim();
+    final ouid = (ownerUid ?? '').trim();
+    final r = OwnershipResolver.resolveVacancyViewerOwnership(
+      ownerType: ot,
+      ownerId: oid,
+      ownerUid: ouid.isEmpty ? null : ouid,
+      createdByUserId: null,
+      companyId: null,
+    );
+    return r.known && r.isOwner;
   }
 
-  String _salaryPeriod() {
-    final t = salaryType.trim().toLowerCase();
-    if (t.contains('hour') || t.contains('час')) return '/ час';
-    return '/ мес';
+  Widget _paidPromotionBadge({
+    required String label,
+    required Color bg,
+    required Color border,
+    required Color fg,
+    IconData? icon,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: border, width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 15, color: fg),
+            const SizedBox(width: 5),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.05,
+              fontWeight: FontWeight.w700,
+              color: fg,
+              letterSpacing: -0.1,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
-  String _money(double v) => '€ ${v.round()}';
+  ({String entityOwnerType, String entityOwnerId}) _promotionEntityScope() {
+    final snap = vacancyOwnershipData;
+    if (snap != null && snap.isNotEmpty) {
+      final resolved = VacancyOwnerScopeResolver.resolveVacancyOwnerScope(snap);
+      if (resolved.isResolved) {
+        if (resolved.ownerType == 'business') {
+          final id = resolved.companyId.trim().isNotEmpty
+              ? resolved.companyId.trim()
+              : resolved.ownerId.trim();
+          return (entityOwnerType: 'business', entityOwnerId: id);
+        }
+        return (
+          entityOwnerType: 'personal',
+          entityOwnerId: resolved.ownerId.trim(),
+        );
+      }
+    }
+    var ot = (vacancyOwnerType ?? '').trim().toLowerCase();
+    final oid = (vacancyOwnerId ?? ownerUid ?? '').trim();
+    if (ot == 'company') ot = 'business';
+    if (ot == 'user') ot = 'personal';
+    if (ot.isEmpty) ot = 'personal';
+    return (entityOwnerType: ot, entityOwnerId: oid);
+  }
 
   String _normalizeSalaryFallback(String raw) {
     var text = raw.trim();
@@ -249,18 +250,32 @@ class WorkaJobCard extends StatelessWidget {
     return '€ —';
   }
 
-  String _salaryMain() {
+  String _moneyCompact(double v) => '€${v.round()}';
+
+  String _salaryDisplayShort() {
     final from = salaryFrom;
     final to = salaryTo;
     if (from != null && to != null && from > 0 && to > 0) {
-      if (from == to) return 'от ${_money(from)}';
-      return '${_money(from)} – ${_money(to)}';
+      if (from == to) return _moneyCompact(from);
+      return '${_moneyCompact(from)}–${_moneyCompact(to)}';
     }
-    if (from != null && from > 0) return 'от ${_money(from)}';
+    if (from != null && from > 0) return _moneyCompact(from);
     if (salaryTextFallback.trim().isNotEmpty) {
-      return _normalizeSalaryFallback(salaryTextFallback);
+      final n = _normalizeSalaryFallback(salaryTextFallback);
+      var s = n.replaceAll(' ', '');
+      s = s.replaceFirst(RegExp(r'^от', caseSensitive: false), '');
+      s = s.replaceFirst(RegExp(r'^до', caseSensitive: false), '');
+      s = s.replaceAll('/мес', '').replaceAll('/час', '').trim();
+      if (s.isEmpty || s == '€—') return '—';
+      return s;
     }
-    return '€ —';
+    return '—';
+  }
+
+  String _salaryPeriodSecondary() {
+    final t = salaryType.trim().toLowerCase();
+    if (t.contains('hour') || t.contains('час')) return 'в час';
+    return 'в месяц';
   }
 
   String _locationText() {
@@ -268,352 +283,478 @@ class WorkaJobCard extends StatelessWidget {
     final countryPart = country.trim();
 
     if (cityPart.isEmpty && countryPart.isEmpty) {
-      return 'Локация не указана';
+      return 'Не указано';
     }
+    final countryWithFlag = countryPart.isNotEmpty
+        ? CountryDisplayFormatter.formatCountryWithLeadingEmoji(countryPart)
+        : '';
     if (countryPart.isEmpty) {
       return cityPart;
     }
     if (cityPart.isEmpty) {
-      return countryPart;
+      return countryWithFlag;
     }
-    return '$countryPart • $cityPart';
+    return '$cityPart, $countryWithFlag';
   }
 
-  Widget _flagBadge(String flag, double fontSize) {
-    return SizedBox(
-      width: 20,
-      height: 14,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(2),
-        child: ColoredBox(
-          color: Colors.transparent,
-          child: Center(
-            child: Text(
-              flag,
-              style: TextStyle(fontSize: fontSize, height: 1.0),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  static const int _maxVacancyConditionIconBadges = 4;
 
-  Widget _iconBadge({
+  Widget _iconOnlyConditionBadge({
     required IconData icon,
+    required Color fill,
+    required Color borderColor,
     required Color iconColor,
-    Color background = const Color(0xFFF2F6FF),
-    Color border = const Color(0xFFDCE5FA),
   }) {
     return Container(
-      width: 28,
-      height: 28,
-      alignment: Alignment.center,
+      width: 30,
+      height: 30,
+      padding: EdgeInsets.zero,
       decoration: BoxDecoration(
-        color: background,
+        color: fill,
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: border, width: 1),
+        border: Border.all(color: borderColor, width: 1),
       ),
+      alignment: Alignment.center,
       child: Icon(icon, size: 16, color: iconColor),
     );
   }
 
-  Widget _compoundNoBadge({required IconData icon, required Color iconColor}) {
+  Widget _iconOnlyOverflowBadge(int extraCount) {
+    final n = extraCount.clamp(1, 99);
     return Container(
-      height: 28,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      width: 30,
+      height: 30,
+      padding: EdgeInsets.zero,
       decoration: BoxDecoration(
-        color: const Color(0xFFFFF2F2),
+        color: const Color(0xFFF3F4F6),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0xFFF8D3D3), width: 1),
+        border: Border.all(color: const Color(0xFFE5E7EB), width: 1),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          const Icon(Icons.close_rounded, size: 16, color: Color(0xFFD32F2F)),
-          const SizedBox(width: 4),
-          Icon(icon, size: 16, color: iconColor),
-        ],
+      alignment: Alignment.center,
+      child: Text(
+        '+$n',
+        maxLines: 1,
+        overflow: TextOverflow.clip,
+        style: const TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          color: Color(0xFF6B7280),
+          height: 1.0,
+        ),
       ),
     );
   }
 
   List<Widget> _conditions() {
-    final out = <Widget>[];
+    final icons = <Widget>[];
+
+    final schedule = employmentLabel.trim();
+    if (schedule.isNotEmpty) {
+      icons.add(
+        _iconOnlyConditionBadge(
+          icon: Icons.access_time_outlined,
+          fill: const Color(0xFFEEF5FF),
+          borderColor: const Color(0xFFD6E4FF),
+          iconColor: const Color(0xFF2F6BFF),
+        ),
+      );
+    }
 
     if (housingProvided) {
-      out.add(
-        _iconBadge(icon: Icons.home_outlined, iconColor: WorkaColors.blue),
-      );
-    }
-    if (transportProvided) {
-      out.add(
-        _iconBadge(
-          icon: Icons.airport_shuttle_outlined,
-          iconColor: const Color(0xFF2E7D32),
-          background: const Color(0xFFE8F5E9),
-          border: const Color(0xFFB7DDBB),
-        ),
-      );
-    }
-    if (forTeenagers) {
-      out.add(
-        _iconBadge(
-          icon: Icons.verified_user_outlined,
-          iconColor: WorkaColors.blue,
-        ),
-      );
-    }
-    if (forDisabled) {
-      out.add(
-        _iconBadge(
-          icon: Icons.accessible_outlined,
-          iconColor: WorkaColors.orange,
-        ),
-      );
-    }
-    if (noLanguageRequired) {
-      out.add(
-        _compoundNoBadge(
-          icon: Icons.translate_rounded,
-          iconColor: WorkaColors.blueDark,
+      icons.add(
+        _iconOnlyConditionBadge(
+          icon: Icons.home_outlined,
+          fill: const Color(0xFFEAF8EE),
+          borderColor: const Color(0xFFD5F0DC),
+          iconColor: const Color(0xFF1A8F45),
         ),
       );
     }
     if (noExperienceRequired) {
-      out.add(
-        _compoundNoBadge(
-          icon: Icons.work_outline_rounded,
-          iconColor: WorkaColors.orange,
+      icons.add(
+        _iconOnlyConditionBadge(
+          icon: Icons.business_center_outlined,
+          fill: const Color(0xFFFFF4E5),
+          borderColor: const Color(0xFFFFE2B8),
+          iconColor: const Color(0xFFF59E0B),
         ),
       );
     }
-    return out;
-  }
-
-  Widget _urgentBadge() {
-    return Container(
-      width: 28,
-      height: 28,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFFFF4D4F), Color(0xFFFF7A18)],
+    if (noLanguageRequired) {
+      icons.add(
+        _iconOnlyConditionBadge(
+          icon: Icons.translate_outlined,
+          fill: const Color(0xFFF3EEFF),
+          borderColor: const Color(0xFFE4D8FF),
+          iconColor: const Color(0xFF7C3AED),
         ),
-        borderRadius: BorderRadius.circular(999),
-        boxShadow: [WorkaUiShadows.single],
-      ),
-      child: const Icon(Icons.flash_on_rounded, size: 16, color: Colors.white),
-    );
-  }
-
-  Widget _pillBadge(String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withOpacity(0.4)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: color,
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.4,
+      );
+    }
+    if (transportProvided) {
+      icons.add(
+        _iconOnlyConditionBadge(
+          icon: Icons.directions_car_outlined,
+          fill: const Color(0xFFF3EEFF),
+          borderColor: const Color(0xFFE4D8FF),
+          iconColor: const Color(0xFF7C3AED),
         ),
-      ),
-    );
+      );
+    }
+    if (forTeenagers) {
+      icons.add(
+        _iconOnlyConditionBadge(
+          icon: Icons.cake_outlined,
+          fill: const Color(0xFFFFF7ED),
+          borderColor: const Color(0xFFFFD8A8),
+          iconColor: const Color(0xFFB45309),
+        ),
+      );
+    }
+    if (forDisabled) {
+      icons.add(
+        _iconOnlyConditionBadge(
+          icon: Icons.accessible_outlined,
+          fill: const Color(0xFFEFF6FF),
+          borderColor: const Color(0xFFC7E2F5),
+          iconColor: const Color(0xFF0369A1),
+        ),
+      );
+    }
+    if (kDebugMode) {
+      debugPrint(
+        '[JOB_BADGE_ROW_RENDER] '
+        'jobId=${jobId.trim()} rawIcons=${icons.length} '
+        'noLang=$noLanguageRequired noExp=$noExperienceRequired '
+        'housing=$housingProvided transport=$transportProvided '
+        'teens=$forTeenagers disabled=$forDisabled',
+      );
+    }
+    if (icons.length <= _maxVacancyConditionIconBadges) {
+      return icons;
+    }
+    final extra = icons.length - _maxVacancyConditionIconBadges;
+    return <Widget>[
+      ...icons.take(_maxVacancyConditionIconBadges),
+      _iconOnlyOverflowBadge(extra),
+    ];
   }
 
-  Widget _reliableEmployerBadge() {
+  bool get _isBusinessVacancy {
+    if (ownerBusinessHint) return true;
+    final ownerType = (vacancyOwnerType ?? '').trim().toLowerCase();
+    if (ownerType == 'company' || ownerType == 'business') return true;
+    return companyName.trim().isNotEmpty;
+  }
+
+  Widget _vacancyOwnerAvatar() {
+    final logo = ownerCompanyLogoUrl.trim();
+    final photo = ownerAvatarUrl.trim();
+    final showBusiness = _isBusinessVacancy;
+    final imageUrl = showBusiness
+        ? (logo.isNotEmpty ? logo : photo)
+        : (photo.isNotEmpty ? photo : logo);
+    final fallbackIcon = showBusiness
+        ? Icons.business_outlined
+        : Icons.account_circle_outlined;
     return Container(
-      width: 24,
-      height: 24,
-      alignment: Alignment.center,
+      width: 60,
+      height: 60,
       decoration: BoxDecoration(
-        color: const Color(0xFFF6F8FF),
+        color: const Color(0xFFEEF2FF),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0xFFDCE5FA), width: 1),
+        border: Border.all(color: const Color(0xFFD7E3FF), width: 1.5),
       ),
-      child: const _VerifiedEmployerGoldBadge(size: 14),
+      clipBehavior: Clip.antiAlias,
+      child: imageUrl.isNotEmpty
+          ? Image.network(
+              imageUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Icon(
+                fallbackIcon,
+                size: 34,
+                color: WorkaColors.blue,
+              ),
+            )
+          : Icon(
+              fallbackIcon,
+              size: 34,
+              color: WorkaColors.blue,
+            ),
     );
   }
 
   Widget _titleLocationSalaryBlock(
     BuildContext context, {
     required Widget rightAction,
-    required bool isOwnerCard,
-    required bool highlightActive,
-    required bool urgentActive,
-    bool bumpActive = false,
-    bool showContactsActive = false,
+    required bool viewerOwnsVacancy,
+    required bool paidUrgent,
+    required bool organicUrgent,
+    bool priorityPromoActive = false,
+    bool showContactsPromoActive = false,
+    bool bumpPromoActive = false,
+    required List<Widget> conditionChips,
+    required List<Widget> paidPromotionBadges,
+    required bool showViewerOwnVacancyBadge,
+    required bool suppressSalaryPromoteButton,
+    required bool highlightCard,
   }) {
-    final trailing = salaryTrailing ?? _promoteButton(context);
+    final hasActivePromotion =
+        paidUrgent ||
+        priorityPromoActive ||
+        showContactsPromoActive ||
+        bumpPromoActive ||
+        organicUrgent ||
+        highlightCard;
+    final Widget? trailing = salaryTrailing ??
+        (suppressSalaryPromoteButton
+            ? null
+            : _promoteButton(context, compact: hasActivePromotion));
     final hasTitle = title.trim().isNotEmpty;
-    final hasCompany = companyName.trim().isNotEmpty;
     final showVacancyNumber =
         showVacancyNumberInOwnerView &&
-        isOwnerCard &&
+        viewerOwnsVacancy &&
         vacancyNumber.trim().isNotEmpty;
-    final cond = _isMarketplaceMode ? _conditions() : const <Widget>[];
-    final countryPart = country.trim();
-    final flag = _flagForCountry(countryPart);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            _vacancyOwnerAvatar(),
+            const SizedBox(width: 14),
             Expanded(
-              child: hasTitle
-                  ? Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        if (urgentActive) ...[
-                          _urgentBadge(),
-                          const SizedBox(width: 8),
-                        ],
-                        Expanded(
-                          child: Text(
-                            title.trim(),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 18,
-                              height: 1.2,
-                              fontWeight: FontWeight.w600,
-                              color: const Color(0xFF2F58CC),
-                              letterSpacing: -0.2,
-                              backgroundColor: highlightActive
-                                  ? Colors.yellow.withOpacity(0.25)
-                                  : null,
-                            ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  hasTitle
+                      ? Text(
+                          title.trim(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            height: 1.05,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF111827),
+                            letterSpacing: -0.2,
+                          ),
+                        )
+                      : Container(
+                          height: 16,
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: WorkaColors.divider,
+                            borderRadius: BorderRadius.circular(6),
                           ),
                         ),
-                        if (_isMarketplaceMode && verifiedEmployer) ...[
-                          const SizedBox(width: 8),
-                          _reliableEmployerBadge(),
-                        ],
-                        if (bumpActive || showContactsActive) ...[
-                          const SizedBox(width: 8),
-                          Wrap(
-                            spacing: 4,
-                            runSpacing: 4,
-                            children: [
-                              if (bumpActive) _pillBadge('BUMP', Colors.blue),
-                              if (showContactsActive)
-                                _pillBadge('CONTACTS', Colors.green),
-                            ],
-                          ),
-                        ],
-                      ],
-                    )
-                  : Container(
-                      height: 16,
-                      width: double.infinity,
+                  if (showViewerOwnVacancyBadge && _isMarketplaceMode) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
                       decoration: BoxDecoration(
-                        color: WorkaColors.divider,
-                        borderRadius: BorderRadius.circular(6),
+                        color: const Color(0xFFEEF5FF),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: const Color(0xFF93C5FD)),
+                      ),
+                      child: const Text(
+                        'Ваша вакансия',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF1D4ED8),
+                        ),
                       ),
                     ),
-            ),
-            const SizedBox(width: 8),
-            Align(alignment: Alignment.center, child: rightAction),
-          ],
-        ),
-        if (hasCompany) ...[
-          const SizedBox(height: 6),
-          Text(
-            companyName.trim(),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF7B88A4),
-            ),
-          ),
-        ],
-        if (showVacancyNumber) ...[
-          const SizedBox(height: 6),
-          Text(
-            'Номер вакансии: ${vacancyNumber.trim()}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: WorkaColors.textGreyDark,
-            ),
-          ),
-        ],
-        const SizedBox(height: 10),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.location_on_rounded,
-              size: 16,
-              color: WorkaColors.blue,
-            ),
-            if (flag.isNotEmpty) ...[
-              const SizedBox(width: 6),
-              _flagBadge(flag, 12),
-            ],
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                _locationText(),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 12.4,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF7D8CA8),
-                ),
+                  ],
+                  if (showVacancyNumber) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '№ ${vacancyNumber.trim()}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: WorkaColors.textGreyDark,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 7),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.location_on_outlined,
+                        size: 16,
+                        color: WorkaColors.blue,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _locationText(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF6B7280),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (paidPromotionBadges.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: paidPromotionBadges,
+                    ),
+                  ],
+                  if (conditionChips.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (var i = 0; i < conditionChips.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 8),
+                          conditionChips[i],
+                        ],
+                      ],
+                    ),
+                  ],
+                ],
               ),
             ),
-            if (trailing != null) ...[const SizedBox(width: 10), trailing],
+            const SizedBox(width: 8),
+            Align(alignment: Alignment.topRight, child: rightAction),
           ],
         ),
-        if (cond.isNotEmpty) ...[
-          const SizedBox(height: 14),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                for (var i = 0; i < cond.length; i++) ...[
-                  if (i > 0) const SizedBox(width: 6),
-                  cond[i],
-                ],
-              ],
-            ),
-          ),
+        if (trailing != null) ...[
+          const SizedBox(height: 8),
+          Align(alignment: Alignment.centerRight, child: trailing),
         ],
       ],
     );
   }
 
-  Widget? _promoteButton(BuildContext context) {
+  Widget? _promoteButton(BuildContext context, {required bool compact}) {
     if (jobId.trim().isEmpty) return null;
-    final ownership = OwnershipResolver.byOwnerId(ownerUid ?? '');
-    final uidMatch = ownership.known && ownership.isOwner;
-    if (!uidMatch) {
-      return null;
+    if (!_viewerOwnsVacancy()) return null;
+    final scope = _promotionEntityScope();
+    final ownerType = scope.entityOwnerType;
+    final ownerId = scope.entityOwnerId;
+    final scopeDecision = CanonicalOwnershipResolver.resolvePromotionAccess(
+      entityOwnerType: ownerType,
+      entityOwnerId: ownerId,
+    );
+    if (!scopeDecision.allowed) {
+      void showBlocked() {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(PromotionOwnershipDecision.mismatchMessage),
+          ),
+        );
+      }
+      if (compact) {
+        return Tooltip(
+          message: PromotionOwnershipDecision.mismatchMessage,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(999),
+            onTap: showBlocked,
+            child: Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: WorkaColors.textGreyDark.withValues(alpha: 0.35),
+                  width: 1.1,
+                ),
+              ),
+              alignment: Alignment.center,
+              child: const Icon(
+                Icons.apartment_outlined,
+                size: 16,
+                color: WorkaColors.textGreyDark,
+              ),
+            ),
+          ),
+        );
+      }
+      return OutlinedButton(
+        onPressed: showBlocked,
+        style: OutlinedButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: WorkaColors.textGreyDark,
+          side: BorderSide(
+            color: WorkaColors.textGreyDark.withValues(alpha: 0.35),
+            width: 1.2,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          shape: const StadiumBorder(),
+        ),
+        child: const Text(
+          'Продвижение',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 12,
+            color: WorkaColors.textGreyDark,
+          ),
+        ),
+      );
+    }
+    if (compact) {
+      return Tooltip(
+        message: 'Продвижение',
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: () {
+            Navigator.of(context, rootNavigator: true).pushNamed(
+              PaymentsRoutes.promoteJob,
+              arguments: <String, dynamic>{
+                'jobId': jobId.trim(),
+                'ownerType': ownerType,
+                'ownerId': ownerId,
+              },
+            );
+          },
+          child: Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: WorkaColors.orange.withValues(alpha: 0.55),
+                width: 1.1,
+              ),
+            ),
+            alignment: Alignment.center,
+            child: const Icon(
+              Icons.apartment_outlined,
+              size: 16,
+              color: WorkaColors.orange,
+            ),
+          ),
+        ),
+      );
     }
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(999),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.17),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+            color: Colors.black.withValues(alpha: 0.008),
+            blurRadius: 1,
+            offset: const Offset(0, 1),
           ),
         ],
       ),
@@ -621,7 +762,11 @@ class WorkaJobCard extends StatelessWidget {
         onPressed: () {
           Navigator.of(context, rootNavigator: true).pushNamed(
             PaymentsRoutes.promoteJob,
-            arguments: <String, dynamic>{'jobId': jobId.trim()},
+            arguments: <String, dynamic>{
+              'jobId': jobId.trim(),
+              'ownerType': ownerType,
+              'ownerId': ownerId,
+            },
           );
         },
         style: OutlinedButton.styleFrom(
@@ -632,7 +777,7 @@ class WorkaJobCard extends StatelessWidget {
           shape: const StadiumBorder(),
         ),
         child: const Text(
-          'Продвижение вакансии',
+          'Продвижение',
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(
@@ -650,7 +795,7 @@ class WorkaJobCard extends StatelessWidget {
       kind: VacancyCtaKind.apply,
       label: applyLabel,
       onTap: onApply ?? onTap,
-      showArrow: true,
+      showArrow: false,
     );
   }
 
@@ -662,9 +807,8 @@ class WorkaJobCard extends StatelessWidget {
   }
 
   Widget _bottomEmploymentBar({required bool hasApplied}) {
-    final ownership = OwnershipResolver.byOwnerId(ownerUid ?? '');
-    final isOwnerCard = ownership.known && ownership.isOwner;
-    final canShowWorkerCta = showApply && !isOwnerCard;
+    final viewerOwns = _viewerOwnsVacancy();
+    final canShowWorkerCta = showApply && !viewerOwns;
     final actionVisible = _isStatusMode
         ? false
         : (_isMarketplaceMode
@@ -680,9 +824,8 @@ class WorkaJobCard extends StatelessWidget {
         ((salaryFrom ?? 0) > 0) ||
         ((salaryTo ?? 0) > 0) ||
         salaryTextFallback.trim().isNotEmpty;
-    final salaryMain = _salaryMain();
-    final salaryPeriod = _salaryPeriod();
-    final salaryAccent = salaryMainColor;
+    final salaryPrimary = _salaryDisplayShort();
+    final salarySecondary = _salaryPeriodSecondary();
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -695,21 +838,21 @@ class WorkaJobCard extends StatelessWidget {
                   text: TextSpan(
                     children: [
                       TextSpan(
-                        text: salaryMain,
-                        style: TextStyle(
-                          fontSize: 28,
-                          height: 1.08,
+                        text: salaryPrimary,
+                        style: const TextStyle(
+                          fontSize: 31,
+                          height: 1.0,
                           fontWeight: FontWeight.w800,
-                          color: salaryAccent,
-                          letterSpacing: -0.2,
+                          color: WorkaColors.orange,
+                          letterSpacing: -0.3,
                         ),
                       ),
                       TextSpan(
-                        text: ' $salaryPeriod',
+                        text: ' $salarySecondary',
                         style: const TextStyle(
-                          fontSize: 11,
+                          fontSize: 14,
                           fontWeight: FontWeight.w600,
-                          color: Color(0xFF8693AD),
+                          color: Color(0xFF6B7280),
                         ),
                       ),
                     ],
@@ -730,17 +873,20 @@ class WorkaJobCard extends StatelessWidget {
             fit: FlexFit.loose,
             child: Align(
               alignment: Alignment.centerRight,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerRight,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    minHeight: 34,
-                    maxWidth: 152,
-                  ),
-                  child: action,
-                ),
-              ),
+              child: bottomRight != null
+                  ? action
+                  : FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          minHeight: 38,
+                          minWidth: 128,
+                          maxWidth: 140,
+                        ),
+                        child: action,
+                      ),
+                    ),
             ),
           ),
         ],
@@ -749,76 +895,176 @@ class WorkaJobCard extends StatelessWidget {
   }
 
   Widget _shell(BuildContext context, {required bool hasApplied}) {
-    final bool highlight = this.highlight;
-    final bool isUrgent = this.isUrgent;
-    final bumpEffective = false;
-    final showContactsEffective = false;
+    final bool organicUrgent = isUrgent;
+    final bumpEffective = bump;
+    final priorityEffective = priority;
+    final showContactsEffective = contacts;
 
-    final ownership = OwnershipResolver.byOwnerId(ownerUid ?? '');
-    final isOwnerCard = ownership.known && ownership.isOwner;
+    final viewerOwns = _viewerOwnsVacancy();
     final rightAction =
         topRight ??
         (_isMarketplaceMode
             ? const FavoriteStarButton(isFavorite: false, size: 30)
             : const SizedBox.shrink());
-    final hasConditions =
-        housingProvided || transportProvided || forTeenagers || forDisabled;
+    final conditionChips = _isMarketplaceMode ? _conditions() : const <Widget>[];
+
+    final entitlementPaidBadges = <Widget>[];
+    if (highlight) {
+      entitlementPaidBadges.add(
+        _paidPromotionBadge(
+          label: 'Выделено',
+          bg: const Color(0xFFFFF7E8),
+          border: const Color(0xFFF59E0B),
+          fg: const Color(0xFFB45309),
+          icon: Icons.auto_awesome_rounded,
+        ),
+      );
+    }
+    if (paidUrgent) {
+      entitlementPaidBadges.add(
+        _paidPromotionBadge(
+          label: 'Срочно',
+          bg: const Color(0xFFFFF1F2),
+          border: const Color(0xFFF87171),
+          fg: const Color(0xFFB91C1C),
+          icon: Icons.flash_on_rounded,
+        ),
+      );
+    }
+    if (priorityEffective) {
+      entitlementPaidBadges.add(
+        _paidPromotionBadge(
+          label: 'Приоритет',
+          bg: const Color(0xFFF5F3FF),
+          border: const Color(0xFFA78BFA),
+          fg: const Color(0xFF5B21B6),
+          icon: Icons.vertical_align_top_rounded,
+        ),
+      );
+    }
+    if (bumpEffective) {
+      entitlementPaidBadges.add(
+        _paidPromotionBadge(
+          label: 'Поднято',
+          bg: const Color(0xFFEFF6FF),
+          border: const Color(0xFF60A5FA),
+          fg: const Color(0xFF1D4ED8),
+          icon: Icons.trending_up_rounded,
+        ),
+      );
+    }
+    if (showContactsEffective) {
+      entitlementPaidBadges.add(
+        _paidPromotionBadge(
+          label: 'Контакты открыты',
+          bg: const Color(0xFFECFDF5),
+          border: const Color(0xFF34D399),
+          fg: const Color(0xFF047857),
+          icon: Icons.contact_phone_outlined,
+        ),
+      );
+    }
+
+    final paidRowWidgets = <Widget>[...entitlementPaidBadges];
+    if (organicUrgent && !paidUrgent) {
+      paidRowWidgets.add(
+        _paidPromotionBadge(
+          label: 'Срочно',
+          bg: const Color(0xFFF9FAFB),
+          border: const Color(0xFFD1D5DB),
+          fg: const Color(0xFF4B5563),
+          icon: Icons.schedule_rounded,
+        ),
+      );
+    }
+
+    if (kDebugMode) {
+      debugPrint(
+        '[JOB_PAID_BADGE_ROW_RENDER] '
+        'jobId=${jobId.trim()} '
+        'highlight=$highlight '
+        'paidUrgent=$paidUrgent '
+        'priority=$priorityEffective '
+        'bump=$bumpEffective '
+        'contacts=$showContactsEffective '
+        'paidBadgeCount=${entitlementPaidBadges.length} '
+        'organicUrgent=${organicUrgent && !paidUrgent}',
+      );
+    }
+
+    final hl = highlight;
+    final cardBorderColor =
+        hl ? const Color(0xFFF59E0B) : const Color(0xFFEEF1F6);
+    final cardBorderWidth = hl ? 2.0 : 1.0;
 
     return _PressScaleCard(
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: _mH, vertical: _mV),
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: highlight ? const Color(0xFFFFF9E6) : const Color(0xFFFFFFFF),
           borderRadius: BorderRadius.circular(_radius),
           border: Border.all(
-            color: Colors.black.withValues(alpha: 0.04),
-            width: 1,
+            color: cardBorderColor,
+            width: cardBorderWidth,
           ),
-          boxShadow: [...WorkaUiShadows.card],
+          gradient: hl
+              ? const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: <Color>[
+                    Color(0xFFFFFDF6),
+                    Color(0xFFFFFFFF),
+                  ],
+                )
+              : null,
+          color: hl ? null : const Color(0xFFFFFFFF),
+          boxShadow: [
+            BoxShadow(
+              color: hl
+                  ? const Color(0xFFF59E0B).withValues(alpha: 0.12)
+                  : Colors.black.withValues(alpha: 0.07),
+              blurRadius: hl ? 16 : 12,
+              spreadRadius: 0,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
-        child: Material(
-          color: const Color(0xFFFFFFFF),
+        child: ClipRRect(
           borderRadius: BorderRadius.circular(_radius),
-          child: InkWell(
-            onTap: onTap ?? onApply,
-            borderRadius: BorderRadius.circular(_radius),
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(_radius),
-                        color: const Color(0xFFFFFFFF),
-                      ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onTap ?? onApply,
+              borderRadius: BorderRadius.circular(_radius),
+              child: Padding(
+                padding: _pad,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _titleLocationSalaryBlock(
+                      context,
+                      rightAction: rightAction,
+                      viewerOwnsVacancy: viewerOwns,
+                      paidUrgent: paidUrgent,
+                      organicUrgent: organicUrgent,
+                      priorityPromoActive: priorityEffective,
+                      showContactsPromoActive: showContactsEffective,
+                      bumpPromoActive: bumpEffective,
+                      conditionChips: conditionChips,
+                      paidPromotionBadges: paidRowWidgets,
+                      showViewerOwnVacancyBadge: viewerOwns,
+                      suppressSalaryPromoteButton:
+                          viewerOwns && bottomRight != null,
+                      highlightCard: highlight,
                     ),
-                  ),
-                ),
-                Padding(
-                  padding: _pad,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _titleLocationSalaryBlock(
-                        context,
-                        rightAction: rightAction,
-                        isOwnerCard: isOwnerCard,
-                        highlightActive: highlight,
-                        urgentActive: isUrgent,
-                        bumpActive: bumpEffective,
-                        showContactsActive: showContactsEffective,
-                      ),
-                      SizedBox(height: hasConditions ? 18 : 14),
-                      _bottomEmploymentBar(hasApplied: hasApplied),
-                      if (footerLeading != null) ...[
-                        const SizedBox(height: 10),
-                        footerLeading!,
-                      ],
+                    const SizedBox(height: 16),
+                    _bottomEmploymentBar(hasApplied: hasApplied),
+                    if (footerLeading != null) ...[
+                      const SizedBox(height: 10),
+                      footerLeading!,
                     ],
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -828,14 +1074,25 @@ class WorkaJobCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ownership = OwnershipResolver.byOwnerId(ownerUid ?? '');
-    final isOwnerCard = ownership.known && ownership.isOwner;
+    final viewerOwns = _viewerOwnsVacancy();
+    final highlightFlag = highlight;
+    final organicUrgentFlag = isUrgent;
+
+    if (kDebugMode) {
+      debugPrint(
+        '[JOB_PROMO_RENDER] '
+        'jobId=${jobId.trim()} highlight=$highlightFlag '
+        'paidUrgent=$paidUrgent organicUrgent=$organicUrgentFlag '
+        'combinedUrgent=${paidUrgent || organicUrgentFlag} '
+        'priority=$priority bump=$bump contacts=$contacts',
+      );
+    }
 
     if (_isStatusMode || (!showApply && bottomRight == null)) {
       return _shell(context, hasApplied: false);
     }
 
-    if (isOwnerCard && bottomRight == null) {
+    if (viewerOwns) {
       return _shell(context, hasApplied: false);
     }
 
@@ -911,55 +1168,3 @@ class _PressScaleCardState extends State<_PressScaleCard> {
   }
 }
 
-class _VerifiedEmployerGoldBadge extends StatelessWidget {
-  const _VerifiedEmployerGoldBadge({this.size = 17});
-
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Positioned.fill(
-            child: ShaderMask(
-              shaderCallback: (rect) => const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xFFFFD54F), Color(0xFFFFB300)],
-              ).createShader(rect),
-              blendMode: BlendMode.srcIn,
-              child: Icon(
-                Icons.shield_rounded,
-                size: size,
-                color: Colors.white,
-              ),
-            ),
-          ),
-          Positioned(
-            right: 1,
-            bottom: 1,
-            child: Container(
-              width: size * 0.42,
-              height: size * 0.42,
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFC22C),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(color: Colors.white, width: 0.8),
-              ),
-              alignment: Alignment.center,
-              child: Icon(
-                Icons.check_rounded,
-                size: size * 0.26,
-                color: Colors.white,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}

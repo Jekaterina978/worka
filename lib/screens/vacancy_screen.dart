@@ -1,16 +1,272 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:worka/services/ownership_resolver.dart';
+import 'package:worka/services/auth_guard.dart';
+import 'package:worka/services/guest_uid_service.dart';
+import 'package:worka/screens/cv/cv_wizard_screen.dart';
+import 'package:worka/screens/cv/widgets/cv_picker_sheet.dart';
+import 'package:worka/services/app_mode.dart';
+import 'package:worka/services/firestore_paths.dart';
+import 'package:worka/services/apply_vacancy_identity_resolver.dart';
+import 'package:worka/repositories/response_repository.dart';
+import 'package:worka/widgets/vacancy_apply_entry_sheet.dart';
+import 'package:worka/widgets/sent_overlay.dart';
+import 'package:worka/services/runtime_flow_logger.dart';
+import 'package:worka/theme/worka_colors.dart';
+
 import '../widgets/worka_header.dart';
 
-class VacancyScreen extends StatelessWidget {
+class VacancyScreen extends StatefulWidget {
   final String jobId;
 
   const VacancyScreen({super.key, required this.jobId});
 
   @override
+  State<VacancyScreen> createState() => _VacancyScreenState();
+}
+
+class _VacancyScreenState extends State<VacancyScreen> {
+  bool _applied = false;
+  bool _applyBusy = false;
+
+  static String _trim(dynamic v) => (v ?? '').toString().trim();
+
+  static Map<String, dynamic> _vacancyPayloadFromDoc(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = Map<String, dynamic>.from(doc.data() ?? {});
+    final id = doc.id;
+    if (_trim(data['firestoreId']).isEmpty) data['firestoreId'] = id;
+    if (_trim(data['firestore_id']).isEmpty) data['firestore_id'] = id;
+    if (_trim(data['id']).isEmpty) data['id'] = id;
+    return data;
+  }
+
+  static String _vacancyOwnerType(Map<String, dynamic> job) {
+    final t = _trim(job['ownerType']).toLowerCase();
+    if (t.isEmpty) return 'personal';
+    if (t == 'company') return 'business';
+    return t;
+  }
+
+  /// Canonical apply send — matches `UnifiedVacancyActions.quickApplyToJob` backend path.
+  Future<bool> _sendApplyWithCv({
+    required BuildContext context,
+    required String jobId,
+    required Map<String, dynamic> jobData,
+  }) async {
+    final db = FirebaseFirestore.instance;
+    try {
+      var uid = (AuthGuard.effectiveUidOrNull() ?? '').trim();
+      if (uid.isEmpty) {
+        uid = await GuestUidService.getOrCreate();
+        AuthGuard.setCachedGuestUid(uid);
+      }
+      if (uid.isEmpty) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'auth_missing',
+          'source': 'vacancy_screen',
+        });
+        if (!context.mounted) return false;
+        await Navigator.of(context, rootNavigator: true).push(
+          MaterialPageRoute(builder: (_) => const CvWizardScreen(testMode: false)),
+        );
+        return false;
+      }
+
+      final cvSnap = await db
+          .collection(FirestorePaths.cvs)
+          .where('ownerId', isEqualTo: uid)
+          .get();
+      RuntimeFlowLogger.mark('APPLY_CV_LIST_QUERY', <String, Object?>{
+        'uid': uid,
+        'source': 'vacancy_screen',
+      });
+      final cvs = cvSnap.docs
+          .where((d) => (d.data()['isDeleted'] ?? false) != true)
+          .toList();
+      RuntimeFlowLogger.mark('APPLY_CV_LIST_RESULT', <String, Object?>{
+        'count': cvs.length,
+        'source': 'vacancy_screen',
+      });
+
+      if (cvs.isEmpty) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'cv_list_empty',
+          'uid': uid,
+          'source': 'vacancy_screen',
+        });
+        if (!context.mounted) return false;
+        await Navigator.of(context, rootNavigator: true).push(
+          MaterialPageRoute(builder: (_) => const CvWizardScreen(testMode: false)),
+        );
+        return false;
+      }
+
+      if (!context.mounted) return false;
+      final picked = await CvPickerSheet.open(
+        context,
+        title: 'Выберите CV',
+        allowCreate: true,
+        forceTestCollection: false,
+      );
+      if (picked == null || picked.cvId.trim().isEmpty) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED_NO_CV', <String, Object?>{
+          'jobId': jobId,
+          'vacancyId': jobId,
+          'userId': uid,
+          'sourceScreen': 'vacancy_screen',
+        });
+        return false;
+      }
+      final selectedCvId = picked.cvId.trim();
+      RuntimeFlowLogger.mark('APPLY_CV_SELECTED', <String, Object?>{
+        'cvId': selectedCvId,
+        'source': 'vacancy_screen',
+      });
+
+      final ownerId = OwnershipResolver.vacancyOwnerIdFromMap(jobData);
+      if (ownerId.isEmpty) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'vacancy_owner_missing',
+          'vacancyId': jobId,
+          'source': 'vacancy_screen',
+        });
+        if (!context.mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Не удалось определить владельца вакансии'),
+          ),
+        );
+        return false;
+      }
+
+      RuntimeFlowLogger.mark('APPLY_PRECHECK_START', <String, Object?>{
+        'source': 'vacancy_screen',
+      });
+      final resolvedIdentity = ApplyVacancyIdentityResolver.resolve(
+        vacancyId: jobId,
+        snapshot: jobData,
+      );
+      ApplyVacancyIdentityResolver.debugLog(
+        identity: resolvedIdentity,
+        vacancyId: jobId,
+        snapshot: jobData,
+      );
+      if (!resolvedIdentity.isResolved) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'job_id_unresolved',
+          'vacancyId': jobId,
+          'source': 'vacancy_screen',
+        });
+        RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+          'ok': false,
+          'reason': 'job_id_unresolved',
+        });
+        if (!context.mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Вакансия не синхронизирована. Отклик пока нельзя отправить.',
+            ),
+          ),
+        );
+        return false;
+      }
+      RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+        'ok': true,
+        'reason': 'ready_to_send',
+      });
+
+      final applyResult = await ResponseRepository(db).createApply(
+        jobId: jobId,
+        jobOwnerId: ownerId,
+        candidateCvId: selectedCvId,
+        candidateOwnerId: uid,
+        vacancyOwnerType: _vacancyOwnerType(jobData),
+        applicantProfileType: AuthGuard.isGuestLikeUid(uid)
+            ? 'guest'
+            : (AppMode.currentMode == AccountMode.business
+                  ? 'business'
+                  : 'personal'),
+        candidateSnapshot: AuthGuard.isGuestLikeUid(uid)
+            ? const <String, dynamic>{
+                'ownerType': 'guest',
+                'isRegistered': false,
+                'label': 'Пользователь незарегистрирован',
+              }
+            : const <String, dynamic>{},
+        vacancySnapshot: Map<String, dynamic>.from(jobData),
+      );
+
+      if (applyResult.isAlreadyApplied) {
+        if (!context.mounted) return false;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('CV уже отправлено')),
+        );
+        return false;
+      }
+      if (applyResult.isBlocked || applyResult.isFailed) {
+        if (!context.mounted) return false;
+        final message = applyResult.reason == 'job_id_unresolved'
+            ? 'Вакансия не синхронизирована. Отклик пока нельзя отправить.'
+            : 'Не удалось отправить отклик. Попробуйте ещё раз.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+        return false;
+      }
+
+      if (!context.mounted) return false;
+      await showSentOverlay(context, 'Отклик отправлен');
+      return true;
+    } catch (e) {
+      if ('$e'.contains('job_id_unresolved')) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'job_id_unresolved',
+          'vacancyId': jobId,
+          'source': 'vacancy_screen',
+        });
+      }
+      if (!context.mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '$e'.contains('job_id_unresolved')
+                ? 'Вакансия не синхронизирована. Отклик пока нельзя отправить.'
+                : 'Не удалось отправить отклик. Попробуйте ещё раз.',
+          ),
+        ),
+      );
+      return false;
+    }
+  }
+
+  Future<void> _onTapApply(
+    BuildContext context,
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) async {
+    if (_applied || _applyBusy) return;
+    final vacancyMap = _vacancyPayloadFromDoc(doc);
+    setState(() => _applyBusy = true);
+    try {
+      final ok = await VacancyApplyEntrySheet.open(
+        context,
+        vacancy: vacancyMap,
+        onSendCvTap: () => _sendApplyWithCv(
+          context: context,
+          jobId: widget.jobId,
+          jobData: vacancyMap,
+        ),
+      );
+      if (!mounted) return;
+      if (ok == true) setState(() => _applied = true);
+    } finally {
+      if (mounted) setState(() => _applyBusy = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final jobRef = FirebaseFirestore.instance.collection('jobs').doc(jobId);
+    final jobRef = FirebaseFirestore.instance.collection('jobs').doc(widget.jobId);
 
     return Scaffold(
       backgroundColor: const Color(0xFF4A6FDB),
@@ -62,20 +318,17 @@ class VacancyScreen extends StatelessWidget {
                   );
                   final city = s(data['city'], fallback: 'Локация не указана');
 
-                  // У тебя salary может быть строкой ("70€ / день")
                   final salary = s(
                     data['salary'],
                     fallback: 'Зарплата не указана',
                   );
 
-                  // Новые поля (если не добавлены — покажем аккуратно)
                   final category = s(
                     data['category'],
                     fallback: 'Категория не указана',
                   );
                   final type = s(data['type'], fallback: 'Тип не указан');
 
-                  // Если ты добавишь salaryFromNum (number), покажем "от ..."
                   final salaryFromNum = data['salaryFromNum'];
                   final salaryFromText = (salaryFromNum is num)
                       ? 'от ${salaryFromNum.toInt()}'
@@ -85,9 +338,8 @@ class VacancyScreen extends StatelessWidget {
                   final requirements = s(data['requirements'], fallback: '');
 
                   final isPremium = (data['isPremium'] ?? false) == true;
-                  final vacancyOwnership = OwnershipResolver.vacancyOwnership(
-                    data,
-                  );
+                  final vacancyOwnership =
+                      OwnershipResolver.vacancyViewerOwnership(data);
                   final isOwnerView =
                       vacancyOwnership.known && vacancyOwnership.isOwner;
 
@@ -153,7 +405,6 @@ class VacancyScreen extends StatelessWidget {
                         ],
                       ),
 
-                      // Bottom button
                       if (!isOwnerView)
                         Align(
                           alignment: Alignment.bottomCenter,
@@ -163,22 +414,36 @@ class VacancyScreen extends StatelessWidget {
                               width: double.infinity,
                               height: 52,
                               child: FilledButton(
-                                onPressed: () {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'Отклик отправлен ✅ (пока заглушка)',
-                                      ),
-                                    ),
-                                  );
-                                },
-                                child: const Text(
-                                  'Взять работу',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w700,
-                                  ),
+                                onPressed: (_applied || _applyBusy)
+                                    ? null
+                                    : () => _onTapApply(context, doc),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: _applied
+                                      ? WorkaColors.blue
+                                      : WorkaColors.orange,
+                                  foregroundColor: Colors.white,
+                                  disabledBackgroundColor: _applied
+                                      ? WorkaColors.blue
+                                      : WorkaColors.orange,
+                                  disabledForegroundColor: Colors.white,
                                 ),
+                                child: _applyBusy
+                                    ? const SizedBox(
+                                        height: 22,
+                                        width: 22,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      )
+                                    : Text(
+                                        _applied ? 'Отклик отправлен' : 'Откликнуться',
+                                        style: const TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.white,
+                                        ),
+                                      ),
                               ),
                             ),
                           ),

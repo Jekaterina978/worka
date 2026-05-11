@@ -7,18 +7,24 @@ import 'package:flutter/material.dart';
 import 'package:worka/services/firebase_debug_diagnostics.dart';
 import 'package:worka/services/firestore_paths.dart';
 import 'package:worka/services/auth_guard.dart';
+import 'package:worka/services/guest_uid_service.dart';
 import 'package:worka/services/ownership_resolver.dart';
 import 'package:worka/repositories/notifications_repository.dart';
 import 'package:worka/repositories/response_repository.dart';
 import 'package:worka/services/app_mode.dart';
+import 'package:worka/services/runtime_flow_logger.dart';
+import 'package:worka/services/apply_vacancy_identity_resolver.dart';
+import 'package:worka/services/ownership_context.dart';
+import 'package:worka/services/vacancy_owner_scope_resolver.dart';
 import 'package:worka/theme/worka_colors.dart';
 import 'package:worka/screens/worker_profile_edit_screen.dart';
+import 'package:worka/screens/cv/cv_wizard_screen.dart';
 import 'package:worka/screens/vacancy_review_screen.dart';
-import 'package:worka/screens/cv/widgets/cv_card_formatters.dart';
-import 'package:worka/widgets/cards/candidate_cv_card.dart';
 import 'package:worka/widgets/vacancy_details_view.dart';
 import 'package:worka/widgets/vacancy_apply_entry_sheet.dart';
 import 'package:worka/features/payments/screens/promote_job_screen.dart';
+import 'package:worka/screens/widgets/vacancy_select_cv_sheet_sections.dart';
+import 'widgets/vacancy_details_widgets.dart';
 
 class VacancyDetailsScreen extends StatefulWidget {
   final String jobId;
@@ -26,7 +32,7 @@ class VacancyDetailsScreen extends StatefulWidget {
   /// Если нужно читать не из jobs (например jobs_test) — передай refOverride.
   final DocumentReference<Map<String, dynamic>>? refOverride;
 
-  /// ✅ testMode = true => в тестовом режиме считаем, что «закрытых функций нет»
+  /// testMode = true => в тестовом режиме считаем, что «закрытых функций нет»
   final bool testMode;
   final bool isOwnerView;
 
@@ -34,7 +40,7 @@ class VacancyDetailsScreen extends StatefulWidget {
     super.key,
     required this.jobId,
     this.refOverride,
-    this.testMode = true,
+    this.testMode = false,
     this.isOwnerView = false,
   });
 
@@ -46,6 +52,29 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
   final _db = FirebaseFirestore.instance;
 
   bool _sending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshJobEntitlementsIfNeeded();
+  }
+
+  @override
+  void didUpdateWidget(covariant VacancyDetailsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.jobId.trim() != widget.jobId.trim()) {
+      _refreshJobEntitlementsIfNeeded();
+    }
+  }
+
+  void _refreshJobEntitlementsIfNeeded() {
+    final jobId = widget.jobId.trim();
+    if (jobId.isEmpty) return;
+    final paid = PaidEntitlementsController.instance;
+    if (paid.shouldRefreshJobEntitlements(jobId)) {
+      Future.microtask(() => paid.refreshJobEntitlements(jobId));
+    }
+  }
 
   DocumentReference<Map<String, dynamic>> get _jobRef =>
       widget.refOverride ??
@@ -59,11 +88,11 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
     final myUid = _uidOrDev().trim().isNotEmpty
         ? _uidOrDev().trim()
         : OwnershipResolver.currentUid();
-    final ownership = OwnershipResolver.vacancyOwnership(
+    final r = OwnershipResolver.vacancyViewerOwnership(
       job,
-      currentUserId: myUid,
+      viewerUid: myUid,
     );
-    return ownership.known && ownership.isOwner;
+    return r.known && r.isOwner;
   }
 
   Future<Map<String, dynamic>?> _loadWorkerProfile(String uid) async {
@@ -110,6 +139,25 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
     required String jobTitle,
     required DocumentReference<Map<String, dynamic>> jobRef,
   }) async {
+    String resolvedUid() => (AuthGuard.effectiveUidOrNull() ?? '').trim();
+
+    var uid = resolvedUid();
+    if (uid.isEmpty) {
+      uid = await GuestUidService.getOrCreate();
+      AuthGuard.setCachedGuestUid(uid);
+      RuntimeFlowLogger.mark('APPLY_AUTH_CONTINUATION_START', <String, Object?>{
+        'stage': 'guest_ready',
+        'uid': uid,
+        'vacancyId': widget.jobId,
+      });
+    } else {
+      RuntimeFlowLogger.mark('APPLY_AUTH_CONTINUATION_START', <String, Object?>{
+        'stage': 'auth_ready',
+        'uid': uid,
+        'vacancyId': widget.jobId,
+      });
+    }
+
     final h = MediaQuery.of(context).size.height;
     return showModalBottomSheet<bool>(
       context: context,
@@ -129,7 +177,6 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
               jobRef: jobRef,
               jobTitle: jobTitle,
               testMode: widget.testMode,
-              uidOrDev: _uidOrDev(),
               loadWorkerProfile: _loadWorkerProfile,
               profileOk: _profileOk,
               openProfileEdit: () async {
@@ -175,7 +222,7 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      'Ошибка: ${snap.error}',
+                      'Не удалось загрузить вакансию. Попробуйте позже.',
                       textAlign: TextAlign.center,
                       style: const TextStyle(
                         color: WorkaColors.textGreyDark,
@@ -243,11 +290,9 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
 
     final title = _s(job['title'], fallback: 'Без названия');
     final jobId = widget.jobId.trim();
-    if (jobId.isNotEmpty && paid.jobEntitlementsById[jobId] == null) {
-      Future.microtask(() => paid.refreshJobEntitlements(jobId));
-    }
     final hasHighlight = paid.hasJobFeature(jobId, 'highlight');
     final hasUrgent = paid.hasJobFeature(jobId, 'urgent');
+    final hasPriority = paid.hasJobFeature(jobId, 'priority');
     final hasBump = paid.hasJobFeature(jobId, 'bump');
     final hasShowContacts = paid.hasJobFeature(jobId, 'show_contacts');
 
@@ -332,6 +377,7 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
       final disabled = applied || _sending;
       final ctaColor = applied ? WorkaColors.blue : WorkaColors.orange;
 
+      final nav = Navigator.of(context);
       return SizedBox(
         width: double.infinity,
         height: 56,
@@ -341,8 +387,12 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
               : () async {
                   setState(() => _sending = true);
                   try {
+                    RuntimeFlowLogger.mark('APPLY_ENTRY_OPEN', <String, Object?>{
+                      'vacancyId': widget.jobId,
+                      'source': 'vacancy_details_screen.bottom_cta',
+                    });
                     final ok = await VacancyApplyEntrySheet.open(
-                      context,
+                      nav.context,
                       vacancy: job,
                       onSendCvTap: () async {
                         final sent = await _openSelectCvSheet(
@@ -354,8 +404,13 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
                     );
                     if (!mounted) return;
                     if (ok == true) {
-                      // ✅ закрываем карточку вакансии и возвращаем в поиск
-                      Navigator.pop(context);
+                      nav.pop();
+                    } else {
+                      ScaffoldMessenger.of(nav.context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Не удалось отправить CV. Повторите.'),
+                        ),
+                      );
                     }
                   } finally {
                     if (mounted) setState(() => _sending = false);
@@ -379,7 +434,7 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
                   ),
                 )
               : Text(
-                  applied ? 'Отклик отправлен' : 'Взять работу',
+                  applied ? 'Отклик отправлен' : 'Откликнуться',
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w900,
@@ -393,30 +448,84 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
     final compactOwnerActions = MediaQuery.of(context).size.width < 360;
     final ctaHeight = isOwner ? (compactOwnerActions ? 156.0 : 90.0) : 56.0;
     final viewData = VacancyDetailsViewData.fromJobMap(job);
+    final promotionIdentity = ApplyVacancyIdentityResolver.resolve(
+      vacancyId: widget.jobId,
+      snapshot: job,
+    );
+    final promotionOwnerScope = VacancyOwnerScopeResolver.resolveVacancyOwnerScope(
+      job,
+    );
+    final promotionTargetId = promotionIdentity.isResolved
+        ? promotionIdentity.apiJobCode
+        : widget.jobId.trim();
+    final promotionBlockedMessage = !promotionIdentity.isResolved
+        ? 'Вакансия не синхронизирована. Продвижение пока недоступно.'
+        : (!promotionOwnerScope.isResolved
+              ? 'Не удалось определить владельца вакансии для продвижения.'
+              : PromotionOwnershipDecision.mismatchMessage);
     final entitlementChips = <Widget>[];
     if (hasUrgent) {
-      entitlementChips.add(_statusChip('Срочно активно', Colors.redAccent));
+      entitlementChips.add(
+        const VacancyStatusChip(text: 'СРОЧНО', color: Color(0xFFB45309)),
+      );
+    }
+    if (hasPriority) {
+      entitlementChips.add(
+        const VacancyStatusChip(text: 'Приоритет', color: Color(0xFF6D28D9)),
+      );
     }
     if (hasBump) {
-      entitlementChips.add(_statusChip('Поднято', Colors.blueGrey));
+      entitlementChips.add(
+        const VacancyStatusChip(text: 'Поднято', color: Color(0xFF2563EB)),
+      );
     }
     if (hasShowContacts) {
-      entitlementChips.add(_statusChip('Контакты доступны', Colors.green));
+      entitlementChips.add(
+        const VacancyStatusChip(
+          text: 'Контакты доступны',
+          color: Color(0xFF15803D),
+        ),
+      );
     }
     final hasEntitlementChips = entitlementChips.isNotEmpty;
     final headerHighlightButton = isOwner
         ? (hasHighlight
-              ? _statusChip('Выделение активно', WorkaColors.orange)
+              ? const VacancyStatusChip(
+                  text: 'Выделено',
+                  color: WorkaColors.orange,
+                )
               : SizedBox(
                   height: 34,
                   child: OutlinedButton(
-                    onPressed: () =>
-                        Navigator.of(context, rootNavigator: true).push(
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                PromoteJobScreen(jobCode: widget.jobId),
+                    onPressed: () {
+                      if (!promotionIdentity.isResolved ||
+                          !promotionOwnerScope.isResolved) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(promotionBlockedMessage)),
+                        );
+                        return;
+                      }
+                      final decision =
+                          CanonicalOwnershipResolver.resolvePromotionAccess(
+                            entityOwnerType: promotionOwnerScope.ownerType,
+                            entityOwnerId: promotionOwnerScope.ownerId,
+                          );
+                      if (!decision.allowed) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(promotionBlockedMessage)),
+                        );
+                        return;
+                      }
+                      Navigator.of(context, rootNavigator: true).push(
+                        MaterialPageRoute(
+                          builder: (_) => PromoteJobScreen(
+                            jobCode: promotionTargetId,
+                            ownerType: promotionOwnerScope.ownerType,
+                            ownerId: promotionOwnerScope.ownerId,
                           ),
                         ),
+                      );
+                    },
                     style: OutlinedButton.styleFrom(
                       foregroundColor: WorkaColors.orange,
                       side: const BorderSide(
@@ -477,7 +586,28 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   if (hasShowContacts && contacts.isNotEmpty) ...[
-                    _ContactCard(contacts: contacts),
+                    VacancyContactCard(contacts: contacts),
+                    const SizedBox(height: 10),
+                  ] else if (hasShowContacts) ...[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE8F7EE),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Colors.green.withValues(alpha: 0.35),
+                        ),
+                      ),
+                      child: const Text(
+                        'Контакты открыты, но работодатель пока не добавил контактные данные.',
+                        style: TextStyle(
+                          color: WorkaColors.textDark,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
                     const SizedBox(height: 10),
                   ],
                   bottomButton(applied),
@@ -499,25 +629,7 @@ class _VacancyDetailsScreenState extends State<VacancyDetailsScreen> {
     );
   }
 
-  Widget _statusChip(String text, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withOpacity(0.4)),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          color: color,
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.2,
-        ),
-      ),
-    );
-  }
+  // _statusChip migrated to VacancyStatusChip widget (see widgets/vacancy_details_widgets.dart)
 }
 
 // ====== CV selection sheet (unchanged) ======
@@ -528,8 +640,6 @@ class _SelectCvForJobSheet extends StatefulWidget {
   final String jobTitle;
   final bool testMode;
 
-  final String uidOrDev;
-
   final Future<Map<String, dynamic>?> Function(String uid) loadWorkerProfile;
   final bool Function(Map<String, dynamic>? profile) profileOk;
   final Future<bool> Function() openProfileEdit;
@@ -539,7 +649,6 @@ class _SelectCvForJobSheet extends StatefulWidget {
     required this.jobRef,
     required this.jobTitle,
     required this.testMode,
-    required this.uidOrDev,
     required this.loadWorkerProfile,
     required this.profileOk,
     required this.openProfileEdit,
@@ -554,6 +663,7 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
 
   bool _sending = false;
   bool _sent = false;
+  bool _sentAsGuest = false;
 
   String? _selectedCvId;
 
@@ -564,181 +674,192 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
     );
   }
 
+  String _resolveAuthUid() {
+    final user = FirebaseAuth.instance.currentUser;
+    final uid = (user == null || user.isAnonymous)
+        ? (AuthGuard.effectiveUidOrNull() ?? '')
+        : user.uid.trim();
+    RuntimeFlowLogger.mark('AUTH_UID_RESOLVE', <String, Object?>{
+      'source': 'firebase',
+      'uid': uid,
+    });
+    return uid;
+  }
+
   Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _cvsStream() {
-    final ownerId = widget.uidOrDev.trim();
+    final ownerId = _resolveAuthUid();
+    RuntimeFlowLogger.mark('APPLY_CV_LIST_QUERY', <String, Object?>{
+      'uid': ownerId,
+    });
     if (ownerId.isEmpty) {
+      RuntimeFlowLogger.mark('CV_REPOSITORY_QUERY', <String, Object?>{
+        'uid': ownerId,
+        'scope': 'selector',
+        'empty_uid': true,
+      });
+      RuntimeFlowLogger.mark('CV_REPOSITORY_RESULT', <String, Object?>{
+        'uid': ownerId,
+        'count': 0,
+        'scope': 'selector',
+      });
+      RuntimeFlowLogger.mark('APPLY_CV_LIST_RESULT', <String, Object?>{
+        'count': 0,
+      });
       return Stream.value(
         const <QueryDocumentSnapshot<Map<String, dynamic>>>[],
       );
     }
-    debugPrint('VacancyDetailsScreen CV stream cvs where ownerId==$ownerId');
+    RuntimeFlowLogger.mark('CV_REPOSITORY_QUERY', <String, Object?>{
+      'uid': ownerId,
+      'scope': 'selector',
+    });
     return _db
         .collection(FirestorePaths.cvs)
         .where('ownerId', isEqualTo: ownerId)
         .snapshots()
         .map((s) {
-          return s.docs
+          final docs = s.docs
               .where((d) => (d.data()['isDeleted'] ?? false) != true)
               .toList();
+          RuntimeFlowLogger.mark('CV_REPOSITORY_RESULT', <String, Object?>{
+            'uid': ownerId,
+            'count': docs.length,
+            'scope': 'selector',
+          });
+          RuntimeFlowLogger.mark('APPLY_CV_LIST_RESULT', <String, Object?>{
+            'count': docs.length,
+          });
+          return docs;
         });
   }
 
-  Widget _workaCheckbox({required bool value, required VoidCallback onTap}) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
-      child: Checkbox(
-        value: value,
-        onChanged: (_) => onTap(),
-        activeColor: WorkaColors.blue,
-        checkColor: Colors.white,
-        side: const BorderSide(color: WorkaColors.fieldBorder, width: 1.4),
-        fillColor: WidgetStateProperty.resolveWith<Color>((states) {
-          if (states.contains(WidgetState.selected)) return WorkaColors.blue;
-          return Colors.transparent;
-        }),
-        overlayColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.hovered) ||
-              states.contains(WidgetState.pressed) ||
-              states.contains(WidgetState.focused)) {
-            return WorkaColors.hoverBlueSoft;
-          }
-          return null;
-        }),
-      ),
-    );
-  }
-
-  String _pick(
-    Map<String, dynamic> data,
-    List<String> keys, {
-    String fallback = '',
-  }) {
-    for (final k in keys) {
-      final v = (data[k] ?? '').toString().trim();
-      if (v.isNotEmpty) return v;
-    }
-    return fallback;
-  }
-
-  String _cvName(Map<String, dynamic> d) {
-    final contacts = (d['contacts'] is Map<String, dynamic>)
-        ? (d['contacts'] as Map<String, dynamic>)
-        : <String, dynamic>{};
-    final full = _pick(contacts, const [
-      'name',
-    ], fallback: _pick(d, const ['name', 'fullName']));
-    if (full.isNotEmpty) return full;
-    final first = _pick(contacts, const [
-      'firstName',
-    ], fallback: d['firstName']?.toString() ?? '');
-    final last = _pick(contacts, const [
-      'lastName',
-    ], fallback: d['lastName']?.toString() ?? '');
-    final combined = '$first $last'.trim();
-    return combined.isEmpty ? 'Кандидат' : combined;
-  }
-
-  int? _cvAge(Map<String, dynamic> d) {
-    final raw = d['age'];
-    if (raw is num && raw > 0) return raw.toInt();
-    final parsed = int.tryParse((raw ?? '').toString().trim());
-    return (parsed != null && parsed > 0) ? parsed : null;
-  }
-
-  String _cvCity(Map<String, dynamic> d) {
-    final desired = (d['desired'] is Map<String, dynamic>)
-        ? (d['desired'] as Map<String, dynamic>)
-        : <String, dynamic>{};
-    final cities = desired['cities'];
-    if (cities is List && cities.isNotEmpty) {
-      final first = cities.first.toString().trim();
-      if (first.isNotEmpty) return first;
-    }
-    return _pick(desired, const [
-      'citiesText',
-      'city',
-    ], fallback: _pick(d, const ['city']));
-  }
-
-  String _cvCountry(Map<String, dynamic> d) {
-    final desired = (d['desired'] is Map<String, dynamic>)
-        ? (d['desired'] as Map<String, dynamic>)
-        : <String, dynamic>{};
-    final countries = desired['countries'];
-    if (countries is List && countries.isNotEmpty) {
-      final first = countries.first.toString().trim();
-      if (first.isNotEmpty) return first;
-    }
-    return _pick(d, const ['country']);
-  }
-
-  String _cvSalary(Map<String, dynamic> d) {
-    final desired = (d['desired'] is Map<String, dynamic>)
-        ? (d['desired'] as Map<String, dynamic>)
-        : <String, dynamic>{};
-    return _pick(desired, const [
-      'salaryText',
-      'salary',
-      'salaryFrom',
-    ], fallback: _pick(d, const ['salaryText', 'salary']));
-  }
-
-  List<String> _cvBadges(Map<String, dynamic> d) {
-    final badges = <String>[];
-    final languages = (d['languages'] is List)
-        ? (d['languages'] as List)
-              .whereType<Map>()
-              .map((e) => Map<String, dynamic>.from(e))
-              .toList()
-        : const <Map<String, dynamic>>[];
-    final skills = (d['computerSkills'] is Map<String, dynamic>)
-        ? (d['computerSkills'] as Map<String, dynamic>)
-        : (d['skills'] is Map<String, dynamic>)
-        ? (d['skills'] as Map<String, dynamic>)
-        : <String, dynamic>{};
-    final driving = (d['drivingLicense'] is Map<String, dynamic>)
-        ? (d['drivingLicense'] as Map<String, dynamic>)
-        : (d['driving'] is Map<String, dynamic>)
-        ? (d['driving'] as Map<String, dynamic>)
-        : <String, dynamic>{};
-    final categoriesRaw = driving['categories'];
-    final categories = (categoriesRaw is List)
-        ? categoriesRaw
-              .map((e) => e.toString().trim())
-              .where((e) => e.isNotEmpty)
-              .toList()
-        : <String>[];
-    final legacyLicense = _pick(driving, const ['license']);
-    if (categories.isEmpty && legacyLicense.isNotEmpty) {
-      categories.add(legacyLicense);
-    }
-    final selectedRaw = skills['selected'] ?? skills['computerPrograms'];
-
-    badges.addAll(
-      buildCandidateBadges(
-        languages: languages,
-        drivingLicenseCategories: categories,
-        hasCar: driving['hasCar'] == true,
-        hasTools: d['hasTools'] == true,
-        hasWorkwear: d['hasWorkwear'] == true,
-        hasComputerSkills: selectedRaw is List && selectedRaw.isNotEmpty,
-      ),
-    );
-    return badges.toSet().take(6).toList();
-  }
+  // _workaCheckbox migrated to WorkaCheckbox widget (see widgets/vacancy_details_widgets.dart)
 
   Future<void> _send() async {
-    if (!AuthGuard.ensureSignedIn(context, message: 'Log in to save')) {
-      return;
-    }
-    final uid = widget.uidOrDev;
-    if (uid.isEmpty) {
-      _toast('Нужно войти по SMS, чтобы откликнуться.');
-      return;
+    RuntimeFlowLogger.mark('APPLY_SEND_TAP', <String, Object?>{
+      'vacancyId': widget.jobId,
+      'cvId': (_selectedCvId ?? '').toString(),
+    });
+    RuntimeFlowLogger.mark('APPLY_PRECHECK_START', <String, Object?>{});
+
+    bool profileHasApplyMinimum(Map<String, dynamic>? profile) {
+      if (profile == null) return false;
+      final firstName = (profile['firstName'] ?? '').toString().trim();
+      final lastName = (profile['lastName'] ?? '').toString().trim();
+      final fullName = (profile['fullName'] ?? profile['name'] ?? '')
+          .toString()
+          .trim();
+      final email = (profile['email'] ?? '').toString().trim();
+      final phone = (profile['phone'] ?? '').toString().trim();
+      final hasName =
+          fullName.isNotEmpty || firstName.isNotEmpty || lastName.isNotEmpty;
+      final hasContact = email.isNotEmpty || phone.isNotEmpty;
+      return hasName && hasContact;
     }
 
+    Map<String, dynamic> hydrateProfileFromCv(
+      Map<String, dynamic>? profile,
+      Map<String, dynamic> cv,
+    ) {
+      final base = Map<String, dynamic>.from(
+        profile ?? const <String, dynamic>{},
+      );
+      String pickString(List<dynamic> values) {
+        for (final value in values) {
+          final text = (value ?? '').toString().trim();
+          if (text.isNotEmpty) return text;
+        }
+        return '';
+      }
+
+      final contacts = (cv['contacts'] is Map)
+          ? Map<String, dynamic>.from(cv['contacts'] as Map)
+          : const <String, dynamic>{};
+      final fullName = pickString([cv['fullName'], cv['name'], cv['title']]);
+      final nameParts = fullName
+          .split(RegExp(r'\s+'))
+          .where((v) => v.isNotEmpty)
+          .toList();
+      final firstName = nameParts.isNotEmpty ? nameParts.first : '';
+      final lastName = nameParts.length > 1
+          ? nameParts.sublist(1).join(' ')
+          : '';
+
+      if ((base['firstName'] ?? '').toString().trim().isEmpty &&
+          firstName.isNotEmpty) {
+        base['firstName'] = firstName;
+      }
+      if ((base['lastName'] ?? '').toString().trim().isEmpty &&
+          lastName.isNotEmpty) {
+        base['lastName'] = lastName;
+      }
+      if ((base['fullName'] ?? base['name'] ?? '').toString().trim().isEmpty &&
+          fullName.isNotEmpty) {
+        base['fullName'] = fullName;
+      }
+      if ((base['email'] ?? '').toString().trim().isEmpty) {
+        final email = pickString([cv['email'], contacts['email']]);
+        if (email.isNotEmpty) base['email'] = email;
+      }
+      if ((base['phone'] ?? '').toString().trim().isEmpty) {
+        final phone = pickString([
+          cv['phone'],
+          cv['phoneNumber'],
+          contacts['phone'],
+          contacts['phoneNumber'],
+        ]);
+        if (phone.isNotEmpty) base['phone'] = phone;
+      }
+      return base;
+    }
+
+    var uid = _resolveAuthUid();
+    if (uid.isEmpty) {
+      uid = await GuestUidService.getOrCreate();
+      AuthGuard.setCachedGuestUid(uid);
+      RuntimeFlowLogger.mark('APPLY_AUTH_CONTINUATION_START', <String, Object?>{
+        'stage': 'guest_ready',
+        'uid': uid,
+        'vacancyId': widget.jobId,
+      });
+    }
+
+    if (uid.isEmpty) {
+      RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+        'reason': 'auth_missing_after_restore',
+      });
+      RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+        'ok': false,
+        'reason': 'auth_missing_after_restore',
+      });
+      _toast('Создайте CV, чтобы откликнуться.');
+      return;
+    }
+    final isGuestCandidate = AuthGuard.isGuestLikeUid(uid);
+
+    // Guest-first: open CV flow; auth will be required inside CV save/send.
     if (_selectedCvId == null) {
+      RuntimeFlowLogger.mark('APPLY_BLOCKED_NO_CV', <String, Object?>{
+        'jobId': widget.jobId,
+        'vacancyId': widget.jobId,
+        'userId': uid,
+        'sourceScreen': 'vacancy_details_screen',
+      });
+      RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+        'ok': false,
+        'reason': 'cv_not_selected',
+      });
+      _toast('Выберите CV.');
+      return;
+    }
+    final selectedCvId = (_selectedCvId ?? '').trim();
+    if (selectedCvId.isEmpty) {
+      RuntimeFlowLogger.mark('APPLY_BLOCKED_NO_CV', <String, Object?>{
+        'jobId': widget.jobId,
+        'vacancyId': widget.jobId,
+        'userId': uid,
+        'sourceScreen': 'vacancy_details_screen',
+      });
       _toast('Выберите CV.');
       return;
     }
@@ -746,22 +867,70 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
     if (await ResponseRepository(_db).hasAppliedOnce(
       jobId: widget.jobId,
       candidateOwnerId: uid,
-      candidateCvId: (_selectedCvId ?? '').toString(),
+        candidateCvId: selectedCvId,
     )) {
+      RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+        'reason': 'duplicate_application',
+      });
+      RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+        'ok': false,
+        'reason': 'duplicate_application',
+      });
       _toast('Вы уже откликались на эту вакансию.');
       return;
     }
 
-    // 1) профиль
-    final profile = await widget.loadWorkerProfile(uid);
-    if (!widget.profileOk(profile)) {
-      final ok = await widget.openProfileEdit();
-      if (!ok) return;
+    Map<String, dynamic> cvData = {};
+    if ((_selectedCvId ?? '').isNotEmpty) {
+      final cvDoc = await _db
+          .collection(FirestorePaths.cvs)
+          .doc(_selectedCvId!)
+          .get();
+      cvData = cvDoc.data() ?? {};
     }
-    final profile2 = await widget.loadWorkerProfile(uid);
-    if (!widget.profileOk(profile2)) {
-      _toast('Заполните профиль полностью.');
-      return;
+
+    // 1) профиль
+    Map<String, dynamic>? profile;
+    Map<String, dynamic>? profile2;
+    if (!isGuestCandidate) {
+      profile = await widget.loadWorkerProfile(uid);
+    }
+    if (!isGuestCandidate && !widget.profileOk(profile)) {
+      final ok = await widget.openProfileEdit();
+      if (!ok) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'profile_edit_cancelled',
+        });
+        RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+          'ok': false,
+          'reason': 'profile_edit_cancelled',
+        });
+        _toast('Профиль не заполнен — отклик не отправлен.');
+        return;
+      }
+    }
+    if (!isGuestCandidate) {
+      profile2 = await widget.loadWorkerProfile(uid);
+    }
+    if (!isGuestCandidate && !widget.profileOk(profile2)) {
+      final hydrated = hydrateProfileFromCv(profile2, cvData);
+      final hydratedOk =
+          widget.profileOk(hydrated) || profileHasApplyMinimum(hydrated);
+      RuntimeFlowLogger.mark('APPLY_PROFILE_HYDRATE_FROM_CV', <String, Object?>{
+        'ok': hydratedOk,
+      });
+      if (!hydratedOk) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'profile_incomplete_after_hydrate',
+        });
+        RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+          'ok': false,
+          'reason': 'profile_incomplete_after_hydrate',
+        });
+        _toast('Заполните профиль полностью.');
+        return;
+      }
+      profile2 = hydrated;
     }
 
     setState(() => _sending = true);
@@ -773,31 +942,59 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
           (job['ownerId'] ?? job['ownerUid'] ?? job['employerId'] ?? '')
               .toString()
               .trim();
-      final workerOwnerKey =
-          FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
-      if (workerOwnerKey.isEmpty) {
-        _toast('Нужен вход');
+      final workerOwnerKey = uid;
+      RuntimeFlowLogger.mark('APPLY_SCOPE_CHECK', <String, Object?>{
+        'mode': isGuestCandidate ? 'guest' : AppMode.currentMode.name,
+        'uid': workerOwnerKey,
+      });
+      if (!isGuestCandidate && AppMode.currentMode != AccountMode.personal) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'mode_not_personal',
+        });
+        RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+          'ok': false,
+          'reason': 'mode_not_personal',
+        });
+        debugPrint(
+          '[OWNER_SCOPE_REJECT] resource=application action=send required=personal current=${AppMode.currentMode.name}',
+        );
+        _toast(
+          'Отклик доступен только в личном профиле. Переключитесь в личный профиль и повторите.',
+        );
         return;
       }
+      if (workerOwnerKey.isEmpty) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'worker_owner_key_empty',
+        });
+        RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+          'ok': false,
+          'reason': 'worker_owner_key_empty',
+        });
+        _toast(
+          'Войдите или зарегистрируйтесь через email или телефон. После входа действие продолжится автоматически.',
+        );
+        return;
+      }
+      RuntimeFlowLogger.mark('APPLY_CV_SELECTED', <String, Object?>{
+        'cvId': selectedCvId,
+      });
 
       final duplicate = await ResponseRepository(_db).hasAppliedOnce(
         jobId: widget.jobId,
         candidateOwnerId: workerOwnerKey,
-        candidateCvId: (_selectedCvId ?? '').toString(),
+        candidateCvId: selectedCvId,
       );
       if (duplicate) {
-        if (mounted) _toast('Отклик уже отправлен');
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'duplicate_application_recheck',
+        });
+        RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+          'ok': false,
+          'reason': 'duplicate_application_recheck',
+        });
+        if (mounted) _toast('CV уже отправлено');
         return;
-      }
-
-      // Load CV snapshot for letter display resilience.
-      Map<String, dynamic> cvData = {};
-      if ((_selectedCvId ?? '').isNotEmpty) {
-        final cvDoc = await _db
-            .collection(FirestorePaths.cvs)
-            .doc(_selectedCvId!)
-            .get();
-        cvData = cvDoc.data() ?? {};
       }
 
       String f(dynamic v) => (v ?? '').toString().trim();
@@ -807,18 +1004,50 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
       }
 
       final applicationId =
-          '${widget.jobId}_${workerOwnerKey}_${(_selectedCvId ?? '').toString()}_apply';
-      await ResponseRepository(_db).createApply(
+          '${widget.jobId}_${workerOwnerKey}_${selectedCvId}_apply';
+      final resolvedIdentity = ApplyVacancyIdentityResolver.resolve(
+        vacancyId: widget.jobId,
+        snapshot: job,
+      );
+      ApplyVacancyIdentityResolver.debugLog(
+        identity: resolvedIdentity,
+        vacancyId: widget.jobId,
+        snapshot: job,
+      );
+      if (!resolvedIdentity.isResolved) {
+        RuntimeFlowLogger.mark('APPLY_BLOCKED', <String, Object?>{
+          'reason': 'job_id_unresolved',
+          'vacancyId': widget.jobId,
+        });
+        RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+          'ok': false,
+          'reason': 'job_id_unresolved',
+        });
+        _toast('Вакансия не синхронизирована. Отклик пока нельзя отправить.');
+        return;
+      }
+      RuntimeFlowLogger.mark('APPLY_PRECHECK_RESULT', <String, Object?>{
+        'ok': true,
+        'reason': 'ready_to_send',
+      });
+      RuntimeFlowLogger.mark('APPLY_SEND_START', <String, Object?>{
+        'vacancyId': widget.jobId,
+        'uid': workerOwnerKey,
+        'cvId': selectedCvId,
+      });
+      RuntimeFlowLogger.mark('APPLY_REPOSITORY_CALL', <String, Object?>{
+        'vacancyId': widget.jobId,
+        'cvId': selectedCvId,
+      });
+      final applyResult = await ResponseRepository(_db).createApply(
         jobId: widget.jobId,
         jobOwnerId: employerUid,
-        candidateCvId: (_selectedCvId ?? '').toString(),
+        candidateCvId: selectedCvId,
         candidateOwnerId: workerOwnerKey,
         vacancyOwnerType: f(job['ownerType']).isEmpty
             ? 'personal'
             : f(job['ownerType']),
-        applicantProfileType: AppMode.currentMode == AccountMode.business
-            ? 'business'
-            : 'personal',
+        applicantProfileType: isGuestCandidate ? 'guest' : 'personal',
         applicantNameSnapshot:
             '${f(profile2?['firstName'])} ${f(profile2?['lastName'])}'.trim(),
         applicantEmailSnapshot: f(profile2?['email']),
@@ -832,8 +1061,38 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
         cvCategorySnapshot: f(cvData['category']),
         cvSkillsSnapshot: list(cvData['skills']),
         vacancySnapshot: Map<String, dynamic>.from(job),
-        candidateSnapshot: Map<String, dynamic>.from(profile2 ?? {}),
+        candidateSnapshot: Map<String, dynamic>.from(
+          isGuestCandidate
+              ? <String, dynamic>{
+                  'ownerType': 'guest',
+                  'isRegistered': false,
+                  'label': 'Пользователь незарегистрирован',
+                }
+              : (profile2 ?? {}),
+        ),
       );
+      if (applyResult.isAlreadyApplied) {
+        RuntimeFlowLogger.mark('APPLY_SEND_RESULT', <String, Object?>{
+          'status': 'already_applied',
+          'vacancyId': widget.jobId,
+        });
+        _toast('CV уже отправлено');
+        return;
+      }
+      if (applyResult.isBlocked || applyResult.isFailed) {
+        RuntimeFlowLogger.mark('APPLY_SEND_RESULT', <String, Object?>{
+          'status': 'error',
+          'vacancyId': widget.jobId,
+          'reason': applyResult.reason,
+          'error': applyResult.error,
+        });
+        if (applyResult.reason == 'job_id_unresolved') {
+          _toast('Вакансия не синхронизирована. Отклик пока нельзя отправить.');
+        } else {
+          _toast('Не удалось отправить отклик. Попробуйте ещё раз.');
+        }
+        return;
+      }
       if (employerUid.isNotEmpty) {
         await NotificationsRepository(_db).createItem(
           toUserId: employerUid,
@@ -843,17 +1102,36 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
           entityId: applicationId,
           payload: {
             'vacancyId': widget.jobId,
-            'cvId': (_selectedCvId ?? '').toString(),
+            'cvId': selectedCvId,
             'shortText': 'Новый отклик на вакансию',
           },
         );
       }
 
       if (!mounted) return;
-      setState(() => _sent = true);
+      setState(() {
+        _sent = true;
+        _sentAsGuest = isGuestCandidate;
+      });
+      RuntimeFlowLogger.mark('APPLY_SEND_RESULT', <String, Object?>{
+        'status': 'success',
+        'vacancyId': widget.jobId,
+      });
     } catch (e) {
       debugPrint('VacancyDetailsScreen _submitApplication error: $e');
-      _toast('Ошибка сохранения: $e');
+      if ('$e'.contains('job_id_unresolved')) {
+        _toast('Вакансия не синхронизирована. Отклик пока нельзя отправить.');
+      } else {
+        _toast('Не удалось отправить отклик. Попробуйте ещё раз.');
+      }
+      RuntimeFlowLogger.mark('APPLY_REPOSITORY_RETURN', <String, Object?>{
+        'status': 'error',
+        'message': e.toString(),
+      });
+      RuntimeFlowLogger.mark('APPLY_SEND_RESULT', <String, Object?>{
+        'status': 'error',
+        'body': e.toString(),
+      });
       if (FirebaseDebugDiagnostics.isPermissionDenied(e)) {
         _toast(FirebaseDebugDiagnostics.permissionHintText());
       }
@@ -867,430 +1145,40 @@ class _SelectCvForJobSheetState extends State<_SelectCvForJobSheet> {
     final title = widget.jobTitle.trim().isEmpty ? 'вакансии' : widget.jobTitle;
 
     if (_sent) {
-      return Material(
-        color: Colors.white,
-        child: Stack(
-          children: [
-            ListView(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 140),
-              children: [
-                const SizedBox(height: 6),
-                Center(
-                  child: Container(
-                    width: 48,
-                    height: 5,
-                    decoration: BoxDecoration(
-                      color: WorkaColors.divider,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Выбрать CV',
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                          color: WorkaColors.textDark,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      tooltip: 'Закрыть',
-                      icon: const Icon(
-                        Icons.close_rounded,
-                        color: WorkaColors.textDark,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                _Card(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: const [
-                      Text(
-                        'Отклик отправлен ✅',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                          color: WorkaColors.textDark,
-                        ),
-                      ),
-                      SizedBox(height: 10),
-                      Text(
-                        'Работодатель получил ваше CV.',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: WorkaColors.textGreyDark,
-                          height: 1.25,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: SafeArea(
-                top: false,
-                minimum: const EdgeInsets.all(16),
-                child: SizedBox(
-                  width: double.infinity,
-                  height: 56,
-                  child: ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: WorkaColors.orange,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(22),
-                      ),
-                    ),
-                    child: const Text(
-                      'Продолжить поиск',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w900,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
+      return VacancySelectCvSentStateView(
+        guestApplied: _sentAsGuest,
+        onClose: () => Navigator.pop(context, true),
       );
     }
 
-    return Material(
-      color: Colors.white,
-      child: Stack(
-        children: [
-          ListView(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 140),
-            children: [
-              const SizedBox(height: 6),
-              Center(
-                child: Container(
-                  width: 48,
-                  height: 5,
-                  decoration: BoxDecoration(
-                    color: WorkaColors.divider,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Выбрать CV для $title',
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w900,
-                        color: WorkaColors.textDark,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context, false),
-                    tooltip: 'Закрыть',
-                    icon: const Icon(
-                      Icons.close_rounded,
-                      color: WorkaColors.textDark,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-
-              StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
-                stream: _cvsStream(),
-                builder: (context, snap) {
-                  if (snap.hasError) {
-                    return _Card(
-                      child: Text(
-                        'Ошибка: ${snap.error}',
-                        style: const TextStyle(color: WorkaColors.textGreyDark),
-                      ),
-                    );
-                  }
-                  if (!snap.hasData) {
-                    return const Padding(
-                      padding: EdgeInsets.only(top: 24),
-                      child: Center(
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    );
-                  }
-
-                  final docs = [...snap.data!];
-                  DateTime parseDate(dynamic v) {
-                    if (v is Timestamp) return v.toDate();
-                    return DateTime.fromMillisecondsSinceEpoch(0);
-                  }
-
-                  docs.sort((a, b) {
-                    final au = parseDate(a.data()['updatedAt']);
-                    final bu = parseDate(b.data()['updatedAt']);
-                    if (au != bu) return bu.compareTo(au);
-                    final ac = parseDate(a.data()['createdAt']);
-                    final bc = parseDate(b.data()['createdAt']);
-                    return bc.compareTo(ac);
-                  });
-                  final limitedDocs = docs.take(5).toList();
-                  if (limitedDocs.isEmpty) {
-                    return _Card(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Text(
-                            'У вас нет CV',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w900,
-                              fontSize: 16,
-                            ),
-                          ),
-                          SizedBox(height: 10),
-                          Text(
-                            'Сначала создайте CV, затем откликайтесь на вакансии.',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w800,
-                              color: WorkaColors.textGreyDark,
-                              height: 1.25,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  }
-
-                  return Column(
-                    children: [
-                      for (final d in limitedDocs) ...[
-                        CandidateCvCard(
-                          mode: CandidateCvCardMode.owner,
-                          cvId: d.id,
-                          fullName: _cvName(d.data()),
-                          age: _cvAge(d.data()),
-                          citizenshipCountry: _pick(d.data(), const [
-                            'citizenshipCountry',
-                            'citizenshipName',
-                            'country',
-                          ]),
-                          profession: _pick(d.data(), const [
-                            'title',
-                            'profession',
-                            'cvTitle',
-                          ], fallback: 'CV'),
-                          city: _cvCity(d.data()),
-                          country: _cvCountry(d.data()),
-                          salary: _cvSalary(d.data()),
-                          readiness: 'Готов к отклику',
-                          badges: _cvBadges(d.data()),
-                          topRight: _workaCheckbox(
-                            value: _selectedCvId == d.id,
-                            onTap: () {
-                              setState(() {
-                                if (_selectedCvId == d.id) {
-                                  _selectedCvId = null;
-                                } else {
-                                  _selectedCvId = d.id;
-                                }
-                              });
-                            },
-                          ),
-                          primaryActionLabel: 'Выбрать CV',
-                          onPrimaryAction: () {
-                            setState(() {
-                              if (_selectedCvId == d.id) {
-                                _selectedCvId = null;
-                              } else {
-                                _selectedCvId = d.id;
-                              }
-                            });
-                          },
-                          margin: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 8,
-                          ),
-                          onTap: () {
-                            setState(() {
-                              if (_selectedCvId == d.id) {
-                                _selectedCvId = null;
-                              } else {
-                                _selectedCvId = d.id;
-                              }
-                            });
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                      ],
-                    ],
-                  );
-                },
-              ),
-            ],
+    return VacancySelectCvPickerView(
+      title: title,
+      cvsStream: _cvsStream(),
+      selectedCvId: _selectedCvId,
+      onToggleSelection: (id) {
+        setState(() {
+          if (_selectedCvId == id) {
+            _selectedCvId = null;
+          } else {
+            _selectedCvId = id;
+          }
+        });
+        RuntimeFlowLogger.mark('APPLY_CV_SELECTED', <String, Object?>{
+          'cvId': (_selectedCvId ?? '').toString(),
+        });
+      },
+      onClose: () => Navigator.pop(context, false),
+      onCreateCv: () async {
+        await Navigator.of(context, rootNavigator: true).push(
+          MaterialPageRoute(
+            builder: (_) => CvWizardScreen(testMode: widget.testMode),
           ),
-
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: SafeArea(
-              top: false,
-              minimum: const EdgeInsets.all(16),
-              child: SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton(
-                  onPressed: _sending ? null : _send,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: WorkaColors.orange,
-                    disabledBackgroundColor: WorkaColors.orange.withValues(
-                      alpha: 0.35,
-                    ),
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(22),
-                    ),
-                  ),
-                  child: _sending
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text(
-                          'Отправить',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w900,
-                            color: Colors.white,
-                          ),
-                        ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ContactCard extends StatelessWidget {
-  const _ContactCard({required this.contacts});
-
-  final Map<String, dynamic> contacts;
-
-  String _pick(List<String> keys) {
-    for (final k in keys) {
-      final v = (contacts[k] ?? '').toString().trim();
-      if (v.isNotEmpty) return v;
-    }
-    return '';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final phone = _pick(['phone', 'tel', 'contactPhone', 'mobile']);
-    final email = _pick(['email', 'contactEmail']);
-    final name = _pick(['name', 'contactName', 'fullName']);
-    final telegram = _pick(['telegram', 'tg', 'tme']);
-    final whatsapp = _pick(['whatsapp', 'wa']);
-    final rows = <Widget>[];
-    void addRow(String label, String value, IconData icon) {
-      if (value.isEmpty) return;
-      rows.add(
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Icon(icon, size: 18, color: WorkaColors.blue),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                '$label: $value',
-                style: const TextStyle(
-                  fontWeight: FontWeight.w700,
-                  color: WorkaColors.textGreyDark,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-      rows.add(const SizedBox(height: 6));
-    }
-
-    addRow('Контактное лицо', name, Icons.person_outline);
-    addRow('Телефон', phone, Icons.phone_outlined);
-    addRow('Email', email, Icons.email_outlined);
-    addRow('Telegram', telegram, Icons.telegram);
-    addRow('WhatsApp', whatsapp, Icons.chat_bubble_outline);
-
-    if (rows.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF4F7FF),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: WorkaColors.blue.withOpacity(0.12)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Контакты работодателя доступны',
-            style: TextStyle(
-              color: WorkaColors.blue,
-              fontWeight: FontWeight.w900,
-              fontSize: 14,
-            ),
-          ),
-          const SizedBox(height: 8),
-          ...rows.take(rows.length - 1),
-        ],
-      ),
-    );
-  }
-}
-
-// ====== Shared helper card ======
-
-class _Card extends StatelessWidget {
-  final Widget child;
-  const _Card({required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: WorkaColors.fieldBorder),
-        boxShadow: [
-          BoxShadow(
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-            color: Colors.black.withValues(alpha: 0.06),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(16),
-      child: child,
+        );
+        if (!mounted) return;
+        setState(() {});
+      },
+      sending: _sending,
+      onSend: _send,
     );
   }
 }
