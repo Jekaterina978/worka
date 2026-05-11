@@ -897,13 +897,6 @@ class ContactAccessController extends ChangeNotifier
     }
   }
 
-  // Backward-compatible aliases
-  bool hasAccessToCandidate(String candidateId) =>
-      hasAccessToCandidateContact(candidateId);
-
-  bool hasAccess(String candidateId) =>
-      hasAccessToCandidateContact(candidateId);
-
   /// Unlock entitlement exists **and** employer contacts payload was loaded from
   /// a successful `/employer/contacts/:id` read (cached in controller state).
   bool hasConfirmedCandidateContact(String candidateId) {
@@ -1383,7 +1376,7 @@ class ContactAccessController extends ChangeNotifier
         ).trim();
     final keyLog =
         resolvedForLog.isNotEmpty ? resolvedForLog : candidateId.trim();
-    if (hasAccessToCandidate(candidateId)) {
+    if (hasAccessToCandidateContact(candidateId)) {
       return CreditSpendTransaction(
         candidateId: candidateId,
         creditsBefore: before,
